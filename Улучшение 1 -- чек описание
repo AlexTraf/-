@@ -294,11 +294,19 @@ for company_path in listdir("./companies"):
     else:
         company_configs[company_path] = default_company_config
 
-    # ДОБАВЛЯЕМ ДЕФОЛТНЫЕ ПАРАМЕТРЫ, ЕСЛИ ИХ НЕТ
+    # Добавляем дефолтные параметры, если их нет
     if 'like_probability' not in company_configs[company_path]:
         company_configs[company_path]['like_probability'] = 0.8
     if 'accounts_per_channel' not in company_configs[company_path]:
         company_configs[company_path]['accounts_per_channel'] = 1
+    if 'story_delay_min' not in company_configs[company_path]:
+        company_configs[company_path]['story_delay_min'] = 1.0
+    if 'story_delay_max' not in company_configs[company_path]:
+        company_configs[company_path]['story_delay_max'] = 2.0
+    if 'likes_per_break' not in company_configs[company_path]:
+        company_configs[company_path]['likes_per_break'] = 50
+    if 'break_seconds' not in company_configs[company_path]:
+        company_configs[company_path]['break_seconds'] = 100
 
 for company_path in listdir("./companies"):
     company_stats[company_path] = {
@@ -563,39 +571,33 @@ async def process_channel(session, channel_id):
 async def process_user_stories(session, user_id):
     company = session.company
     cursor = conn.cursor()
-
     cursor.execute("""
         SELECT last_processed
         FROM processed_users
         WHERE user_id = ?
     """, (user_id,))
     result = cursor.fetchone()
-
     if result and result[0]:
         last_processed = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S.%f")
         last_processed = last_processed.replace(tzinfo=pytz.UTC)
         if (datetime.now(pytz.UTC) - last_processed).total_seconds() < 24 * 3600:
             rootLogger.info(f"Пользователь {user_id} уже обработан менее 24 часов назад, пропускаем")
             return
-
     try:
         try:
             user = await session.app.get_entity(user_id)
             peer = await session.app.get_input_entity(user)
         except ValueError:
             return
-
         user_display = f"@{user.username}" if user.username else f"ID {user_id}"
-
         # Проверка на чёрный список
         if user.username and is_user_in_blacklist(user.username, company):
             rootLogger.info(f"Пользователь {user_display} находится в чёрном списке компании {company}, пропускаем")
             return
-
         async with stats_lock:
             company_stats[company]["unique_users"].add(user_id)
             rootLogger.info(f"Добавлен пользователь {user_display} в unique_users для компании {company}, всего: {len(company_stats[company]['unique_users'])}")
-        
+       
         peer_stories = await session.app(GetPeerStoriesRequest(peer=peer))
         if not peer_stories.stories or not peer_stories.stories.stories:
             rootLogger.info(f"У пользователя {user_display} нет сторис")
@@ -605,14 +607,14 @@ async def process_user_stories(session, user_id):
             """, (user_id, user.username, datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")))
             conn.commit()
             return
-        
+       
         stories = peer_stories.stories.stories
         rootLogger.info(f"Пользователь {user_display} имеет {len(stories)} сторис")
-        
+       
         async with stats_lock:
             company_stats[company]["unique_users_with_stories"].add(user_id)
             rootLogger.info(f"Добавлен пользователь {user_display} в unique_users_with_stories для компании {company}, всего: {len(company_stats[company]['unique_users_with_stories'])}")
-        
+       
         for story in stories:
             try:
                 await session.app(ReadStoriesRequest(peer=peer, max_id=story.id))
@@ -620,15 +622,16 @@ async def process_user_stories(session, user_id):
                 log_message = f"Аккаунт {session.filename} (компания {company}) просмотрел сторис {story.id} у {user_display}"
                 rootLogger.info(log_message)
                 write_daily_log(log_message)
-                
+               
                 async with stats_lock:
                     company_stats[company]["stories_viewed"] += 1
-                
+               
                 like_prob = company_configs[company].get('like_probability', 0.8)
                 if random.random() < like_prob:
-                    if company_stats[company]["likes_set"] % LIKES_PER_ACCOUNT == 0:
-                        await asyncio.sleep(LIKES_WAIT_SECONDS)
-
+                    likes_per_break = company_configs[company].get('likes_per_break', 50)
+                    break_seconds = company_configs[company].get('break_seconds', 100)
+                    if company_stats[company]["likes_set"] % likes_per_break == 0:
+                        await asyncio.sleep(break_seconds)
                     reaction = random.choice(POSITIVE_REACTIONS)
                     await session.app(SendReactionRequest(
                         peer=peer,
@@ -639,17 +642,19 @@ async def process_user_stories(session, user_id):
                     log_message = f"Аккаунт {session.filename} (компания {company}) лайкнул сторис {story.id} у {user_display} с {reaction}"
                     rootLogger.info(log_message)
                     write_daily_log(log_message)
-
                     async with stats_lock:
                         company_stats[company]["likes_set"] += 1
-                        
+                       
                 else:
                     rootLogger.info(f"Сторис {story.id} от {user_display} просто просмотрена")
                     log_message = f"Сторис {story.id} от {user_display} просто просмотрена"
                     rootLogger.info(log_message)
                     write_daily_log(log_message)
-                
-                await asyncio.sleep(random.uniform(1, 2))
+               
+                # Задержка между сторис из config
+                story_delay_min = company_configs[company].get('story_delay_min', 1.0)
+                story_delay_max = company_configs[company].get('story_delay_max', 2.0)
+                await asyncio.sleep(random.uniform(story_delay_min, story_delay_max))
             except FloodWaitError as e:
                 log_msg = f"FloodWait при обработке сторис {story.id} от {user_display}: ждём {e.seconds} секунд"
                 rootLogger.warning(log_msg)
@@ -660,13 +665,11 @@ async def process_user_stories(session, user_id):
             except Exception as e:
                 rootLogger.error(f"Ошибка обработки сторис {story.id} от {user_display}: {str(e)}")
                 continue
-
         cursor.execute("""
             INSERT OR REPLACE INTO processed_users (user_id, username, last_processed)
             VALUES (?, ?, ?)
         """, (user_id, user.username if user.username else None, datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")))
         conn.commit()
-
     except FloodWaitError as e:
         log_msg = f"FloodWait при получении сторис пользователя {user_display}: ждём {e.seconds} секунд"
         rootLogger.warning(log_msg)
@@ -1741,12 +1744,32 @@ async def create_channel_for_accounts(data, message, state: FSMContext):
                 end = len(text)
             if start >= end or start >= len(text) or start < 0:
                 continue
+            entity_text = result[start:end]
             if entity.type == "bold":
-                result = result[:start] + "<b>" + result[start:end] + "</b>" + result[end:]
+                replacement = f"<b>{entity_text}</b>"
             elif entity.type == "italic":
-                result = result[:start] + "<i>" + result[start:end] + "</i>" + result[end:]
+                replacement = f"<i>{entity_text}</i>"
             elif entity.type == "spoiler":
-                result = result[:start] + "<spoiler>" + result[start:end] + "</spoiler>" + result[end:]
+                replacement = f"<spoiler>{entity_text}</spoiler>"
+            elif entity.type == "code":
+                replacement = f"<code>{entity_text}</code>"
+            elif entity.type == "pre":
+                replacement = f"<pre>{entity_text}</pre>"  # Для pre с language, но упрощённо
+            elif entity.type == "underline":
+                replacement = f"<u>{entity_text}</u>"
+            elif entity.type == "strikethrough":
+                replacement = f"<s>{entity_text}</s>"
+            elif entity.type == "text_link":
+                url = entity.url
+                replacement = f'<a href="{url}">{entity_text}</a>'
+            elif entity.type == "text_mention":
+                # Для упоминаний — ссылка на user
+                user_id = entity.user.id if hasattr(entity, 'user') and entity.user else entity_text
+                replacement = f'<a href="tg://user?id={user_id}">{entity_text}</a>'
+            else:
+                rootLogger.warning(f"Неизвестный тип entity: {entity.type}, пропускаем")
+                continue
+            result = result[:start] + replacement + result[end:]
         return result
 
     for session in ses:
@@ -3015,34 +3038,91 @@ async def handle_setup_value(message: atypes.Message, state: FSMContext):
     current_index = data.get("current_index", 0)
 
     try:
+        value = float(message.text.strip()) if current_param in ["story_delay_min", "story_delay_max"] else int(message.text.strip())
         if current_param == "like_probability":
             value = float(message.text.strip())
             if not 0 <= value <= 100:
                 raise ValueError("Должно быть от 0 до 100")
             company_configs[current_company]["like_probability"] = value / 100
-            # Сохраняем config сразу после like_probability
+            # Сохраняем config сразу
             config_file = f"./companies/{current_company}/config.json"
             with open(config_file, "w", encoding='utf-8') as f:
                 json.dump(company_configs[current_company], f, ensure_ascii=False)
             rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value / 100}")
             await message.reply(
                 f"Вероятность лайка для '{current_company}' установлена на {int(value)}%.\n"
-                f"Теперь укажите кол-во аккаунтов на один канал (целое число ≥1):"
+                f"Теперь кол-во акков на канал (целое >=1):"
             )
             await state.update_data(current_param="accounts_per_channel")
-        else:  # accounts_per_channel
-            value = int(message.text.strip())
+        elif current_param == "accounts_per_channel":
             if value < 1:
-                raise ValueError("Должно быть не менее 1")
+                raise ValueError("Должно быть >=1")
             company_configs[current_company]["accounts_per_channel"] = value
-            # Сохраняем config после accounts_per_channel
+            # Сохраняем config
             config_file = f"./companies/{current_company}/config.json"
             with open(config_file, "w", encoding='utf-8') as f:
                 json.dump(company_configs[current_company], f, ensure_ascii=False)
             rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value}")
             await message.reply(
-                f"Кол-во аккаунтов на канал для '{current_company}' установлено на {value}.\n"
-                f"Настройки завершены."
+                f"Кол-во акков на канал для '{current_company}' = {value}.\n"
+                f"Теперь мин. задержка между сторис (сек, float >=0.5):"
+            )
+            await state.update_data(current_param="story_delay_min")
+        elif current_param == "story_delay_min":
+            if value < 0.5:
+                raise ValueError("Должно быть >=0.5")
+            company_configs[current_company]["story_delay_min"] = value
+            # Сохраняем config
+            config_file = f"./companies/{current_company}/config.json"
+            with open(config_file, "w", encoding='utf-8') as f:
+                json.dump(company_configs[current_company], f, ensure_ascii=False)
+            rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value}")
+            await message.reply(
+                f"Мин. задержка между сторис для '{current_company}' = {value}с.\n"
+                f"Макс. задержка между сторис (сек, float > min):"
+            )
+            await state.update_data(current_param="story_delay_max")
+        elif current_param == "story_delay_max":
+            story_delay_min = company_configs[current_company].get('story_delay_min', 1.0)
+            if value <= story_delay_min:
+                raise ValueError(f"Должно быть > {story_delay_min}")
+            company_configs[current_company]["story_delay_max"] = value
+            # Сохраняем config
+            config_file = f"./companies/{current_company}/config.json"
+            with open(config_file, "w", encoding='utf-8') as f:
+                json.dump(company_configs[current_company], f, ensure_ascii=False)
+            rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value}")
+            await message.reply(
+                f"Макс. задержка между сторис для '{current_company}' = {value}с.\n"
+                f"Лайков до перерыва (целое >=10):"
+            )
+            await state.update_data(current_param="likes_per_break")
+        elif current_param == "likes_per_break":
+            if value < 10:
+                raise ValueError("Должно быть >=10")
+            company_configs[current_company]["likes_per_break"] = value
+            # Сохраняем config
+            config_file = f"./companies/{current_company}/config.json"
+            with open(config_file, "w", encoding='utf-8') as f:
+                json.dump(company_configs[current_company], f, ensure_ascii=False)
+            rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value}")
+            await message.reply(
+                f"Лайков до перерыва для '{current_company}' = {value}.\n"
+                f"Длительность перерыва (сек, целое >=30):"
+            )
+            await state.update_data(current_param="break_seconds")
+        elif current_param == "break_seconds":
+            if value < 30:
+                raise ValueError("Должно быть >=30")
+            company_configs[current_company]["break_seconds"] = value
+            # Сохраняем config
+            config_file = f"./companies/{current_company}/config.json"
+            with open(config_file, "w", encoding='utf-8') as f:
+                json.dump(company_configs[current_company], f, ensure_ascii=False)
+            rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value}")
+            await message.reply(
+                f"Перерыв после {company_configs[current_company]['likes_per_break']} лайков = {value}с.\n"
+                f"Настройки для '{current_company}' завершены."
             )
             current_index += 1
             if current_index < len(selected):

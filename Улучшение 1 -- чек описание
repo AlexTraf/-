@@ -11,7 +11,7 @@ from telethon.errors import ChannelPrivateError, FloodWaitError, ForbiddenError,
 from telethon.tl.types import ChannelParticipantBanned, ReactionEmoji
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import ImportChatInviteRequest, DeleteHistoryRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
 from aiogram import Bot, Dispatcher, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -25,8 +25,6 @@ import json
 import tempfile
 import shutil
 from telethon.tl.functions.stories import GetPeerStoriesRequest, ReadStoriesRequest, SendReactionRequest
-from typing import Union
-import re
 # Логгер
 rootLogger = logging.getLogger('root')
 rootLogger.setLevel(logging.DEBUG)
@@ -64,7 +62,6 @@ company_stats = {}
 stats_lock = asyncio.Lock()
 chat_lock = asyncio.Lock()
 
-current_company = None
 
 company_active = {}
 
@@ -151,6 +148,9 @@ class CompanyToggleState(StatesGroup):
 class AddChatsState(StatesGroup):
     chats = State()
 
+class SetupParamsState(StatesGroup):
+    waiting_value = State()
+
 class BlacklistState(StatesGroup):
     company = State()
     usernames = State()
@@ -168,10 +168,6 @@ class CollectViewsStatsState(StatesGroup):
 
 class CreateCompanyState(StatesGroup):
     name = State()
-
-class CompanyConfigChangeState(StatesGroup):
-    change = State()
-    value = State()
 
 class AddPrivateChannelState(StatesGroup):
     name = State()
@@ -214,9 +210,15 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             link TEXT NOT NULL UNIQUE,
             last_processed TIMESTAMP,
-            status TEXT DEFAULT 'pending'  -- 'pending', 'processing', 'processed'
+            status TEXT DEFAULT 'pending'
         )
     """)
+
+    # ДОБАВЛЯЕМ НОВУЮ КОЛОНКУ, ЕСЛИ ЕЁ НЕТ
+    cursor.execute("PRAGMA table_info(channels)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'current_processed' not in columns:
+        cursor.execute("ALTER TABLE channels ADD COLUMN current_processed INTEGER DEFAULT 0")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_users (
@@ -248,22 +250,6 @@ def is_user_in_blacklist(username: str, company: str) -> bool:
     cursor.execute("SELECT 1 FROM blacklist WHERE username = ? AND company = ?", (username, company))
     return cursor.fetchone() is not None
 
-def load_sessions():
-    global sessions
-    sessions = []
-    for company in company_configs.keys():
-        sessions_dir = f"./companies/{company}/sessions"
-        if os.path.exists(sessions_dir):
-            for filename in os.listdir(sessions_dir):
-                if filename.endswith('.session'):
-                    full_path = os.path.join(sessions_dir, filename)
-                    client = make_client(full_path)
-                    session = Session(client, filename, company)
-                    sessions.append(session)
-    log_msg = f"Загружено {len(sessions)} сессий для проверки."
-    rootLogger.info(log_msg)
-    write_daily_log(log_msg)
-
 def load_channels_to_db(company):
     cursor = conn.cursor()
     total_channels = 0
@@ -275,8 +261,8 @@ def load_channels_to_db(company):
             total_channels += len(channels)
             for channel in channels:
                 cursor.execute("""
-                    INSERT OR IGNORE INTO channels (link, status, last_processed)
-                    VALUES (?, 'pending', NULL)
+                    INSERT OR IGNORE INTO channels (link, status, last_processed, current_processed)
+                    VALUES (?, 'pending', NULL, 0)
                 """, (channel,))
 
     users_sub_txt_path = f"./companies/{company}/channels_sub.txt"
@@ -286,9 +272,12 @@ def load_channels_to_db(company):
             total_channels += len(channels)
             for channel in channels:
                 cursor.execute("""
-                    INSERT OR IGNORE INTO channels (link, status, last_processed)
-                    VALUES (?, 'processed', ?)
+                    INSERT OR IGNORE INTO channels (link, status, last_processed, current_processed)
+                    VALUES (?, 'processed', ?, 0)
                 """, (channel, datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")))
+
+    # Сброс current_processed для всех processed каналов
+    cursor.execute("UPDATE channels SET current_processed = 0 WHERE status = 'processed'")
     
     conn.commit()
     rootLogger.info(f"Загружено {total_channels} каналов для компании {company} в базу данных")
@@ -298,21 +287,18 @@ with open(f"proxies.txt", "r", encoding='utf-8') as proxy_file:
     proxy_content = proxy_file.read().replace("\r", "")
     proxies = list(map(lambda x: ("http", *x.split(":")), proxy_content.split("\n")))
 
-# В глобальной области, где загружаются company_configs
 for company_path in listdir("./companies"):
     if path.exists(f"./companies/{company_path}/config.json"):
         with open(f"./companies/{company_path}/config.json", "r", encoding='utf-8') as config_file:
             company_configs[company_path] = json.load(config_file)
-            # Устанавливаем значения по умолчанию, если параметры отсутствуют
-            if 'like_probability' not in company_configs[company_path]:
-                company_configs[company_path]['like_probability'] = 0.8  # Значение по умолчанию
-            if 'accounts_per_channel' not in company_configs[company_path]:
-                company_configs[company_path]['accounts_per_channel'] = 1  # Значение по умолчанию
     else:
-        company_configs[company_path] = {
-            'like_probability': 0.8,
-            'accounts_per_channel': 1
-        }
+        company_configs[company_path] = default_company_config
+
+    # ДОБАВЛЯЕМ ДЕФОЛТНЫЕ ПАРАМЕТРЫ, ЕСЛИ ИХ НЕТ
+    if 'like_probability' not in company_configs[company_path]:
+        company_configs[company_path]['like_probability'] = 0.8
+    if 'accounts_per_channel' not in company_configs[company_path]:
+        company_configs[company_path]['accounts_per_channel'] = 1
 
 for company_path in listdir("./companies"):
     company_stats[company_path] = {
@@ -352,7 +338,6 @@ def save_stats(company):
         "unique_users_with_stories": set()
     })
     stats_file = f"./companies/{company}/company_stats.json"
-    config_file = f"./companies/{company}/config.json"
     try:
         data_to_save = {
             "stories_viewed": stats["stories_viewed"],
@@ -371,10 +356,7 @@ def save_stats(company):
                        f"chats_processed={stats['chats_processed']}")
         with open(stats_file, "w", encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False)
-        # Сохраняем конфигурацию компании
-        with open(config_file, "w", encoding='utf-8') as f:
-            json.dump(company_configs[company], f, ensure_ascii=False)
-        rootLogger.info(f"Успешно сохранено для {company} в {stats_file} и {config_file}")
+        rootLogger.info(f"Успешно сохранено для {company} в {stats_file}")
     except Exception as e:
         rootLogger.error(f"Ошибка сохранения для {company}: {str(e)}")
 
@@ -447,12 +429,12 @@ def get_all_stats():
     stats.append("Общая статистика по всем компаниям:")
     stats.append(f"Аккаунтов: {total_accounts}")
     stats.append(f"Лайков сторис сегодня: {sum(s.story_likes_today for s in sessions if s.me)}")
-    stats.append(f"Сторис просмотрено: {sum(stats['stories_viewed'] for stats in company_stats.values())}")
-    stats.append(f"Лайков поставлено: {sum(stats['likes_set'] for stats in company_stats.values())}")
-    stats.append(f"Уникальных пользователей открыто: {len(set.union(*(stats['unique_users'] for stats in company_stats.values())))}")
-    stats.append(f"Уникальных пользователей со сторисами: {len(set.union(*(stats['unique_users_with_stories'] for stats in company_stats.values())))}")  # Новый счётчик
-    stats.append(f"Каналов пройдено: {sum(stats['channels_processed'] for stats in company_stats.values())}")
-    stats.append(f"Чатов пройдено: {sum(stats['chats_processed'] for stats in company_stats.values())}")
+    stats.append(f"Сторис просмотрено: {sum(company_stats[company]['stories_viewed'] for company in company_stats)}")
+    stats.append(f"Лайков поставлено: {sum(company_stats[company]['likes_set'] for company in company_stats)}")
+    stats.append(f"Уникальных пользователей открыто: {len(set.union(*(company_stats[company]['unique_users'] for company in company_stats)))}")
+    stats.append(f"Уникальных пользователей со сторисами: {len(set.union(*(company_stats[company]['unique_users_with_stories'] for company in company_stats)))}")  # Новый счётчик
+    stats.append(f"Каналов пройдено: {sum(company_stats[company]['channels_processed'] for company in company_stats)}")
+    stats.append(f"Чатов пройдено: {sum(company_stats[company]['chats_processed'] for company in company_stats)}")
     return "\n".join(stats)
 
 
@@ -642,9 +624,8 @@ async def process_user_stories(session, user_id):
                 async with stats_lock:
                     company_stats[company]["stories_viewed"] += 1
                 
-                # Используем вероятность лайка из конфигурации компании
-                like_probability = company_configs[company].get('like_probability', 0.8)
-                if random.random() < like_probability:
+                like_prob = company_configs[company].get('like_probability', 0.8)
+                if random.random() < like_prob:
                     if company_stats[company]["likes_set"] % LIKES_PER_ACCOUNT == 0:
                         await asyncio.sleep(LIKES_WAIT_SECONDS)
 
@@ -733,8 +714,8 @@ async def add_chats_file(message: atypes.Message, state: FSMContext):
             if chat:
                 try:
                     cursor.execute("""
-                        INSERT OR IGNORE INTO channels (link, status, last_processed)
-                        VALUES (?, 'pending', NULL)
+                        INSERT OR IGNORE INTO channels (link, status, last_processed, current_processed)
+                        VALUES (?, 'pending', NULL, 0)
                     """, (chat,))
                     if cursor.rowcount > 0:
                         added_count += 1
@@ -788,6 +769,17 @@ async def join_by_invite_link(session, invite_link):
 async def periodic_save_stats():
     while True:
         try:
+            # СОХРАНЯЕМ КОНФИГИ КОМПАНИЙ
+            for company in company_configs.keys():
+                config_file = f"./companies/{company}/config.json"
+                try:
+                    with open(config_file, "w", encoding='utf-8') as f:
+                        json.dump(company_configs[company], f, ensure_ascii=False)
+                    rootLogger.info(f"Сохранена конфигурация для {company} в {config_file}")
+                except Exception as e:
+                    rootLogger.error(f"Ошибка сохранения конфигурации для {company}: {str(e)}")
+
+            # СОХРАНЯЕМ СТАТИСТИКУ
             for company in company_stats.keys():
                 async with stats_lock:
                     save_stats(company)
@@ -825,47 +817,82 @@ async def worker_liking_stories(session: Session):
                     await asyncio.sleep(60)
                     continue
 
-            cursor = conn.cursor()
-            # Проверяем, сколько аккаунтов уже обработали канал
-            cursor.execute("""
-                SELECT link, COUNT(*) as processed_count
-                FROM channels
-                WHERE status = 'processing' OR status = 'processed'
-                GROUP BY link
-                HAVING processed_count < ?
-                LIMIT 1
-            """, (company_configs[company].get('accounts_per_channel', 1),))
-            result = cursor.fetchone()
+            accounts_per_channel = company_configs[company].get('accounts_per_channel', 1)
+            chat = None
+            is_new_channel = False
 
-            if not result:
+            async with chat_lock:
+                cursor = conn.cursor()
                 cursor.execute("""
-                    UPDATE channels
-                    SET status = 'pending'
-                    WHERE status = 'processed'
-                    AND last_processed < ?
-                """, ((datetime.now(pytz.UTC) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S.%f"),))
-                conn.commit()
-
-                cursor.execute("""
-                    SELECT link
-                    FROM channels
+                    SELECT id, link FROM channels
                     WHERE status = 'pending'
                     LIMIT 1
                 """)
-                result = cursor.fetchone()
+                pending_result = cursor.fetchone()
+                if pending_result:
+                    channel_id_db, chat_link = pending_result
+                    cursor.execute("""
+                        UPDATE channels
+                        SET status = 'processing', current_processed = 1
+                        WHERE id = ?
+                    """, (channel_id_db,))
+                    conn.commit()
+                    chat = chat_link
+                    is_new_channel = True
+                else:
+                    cursor.execute("""
+                        SELECT id, link FROM channels
+                        WHERE status = 'processing' AND current_processed < ?
+                        LIMIT 1
+                    """, (accounts_per_channel,))
+                    processing_result = cursor.fetchone()
+                    if processing_result:
+                        channel_id_db, chat_link = processing_result
+                        cursor.execute("""
+                            UPDATE channels
+                            SET current_processed = current_processed + 1
+                            WHERE id = ?
+                        """, (channel_id_db,))
+                        conn.commit()
+                        chat = chat_link
+                        is_new_channel = False
+                    else:
+                        conn.commit()
+                        # Сброс processed каналов старше 24 часов
+                        cursor.execute("""
+                            UPDATE channels
+                            SET status = 'pending', current_processed = 0
+                            WHERE status = 'processed'
+                            AND last_processed < ?
+                        """, ((datetime.now(pytz.UTC) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S.%f"),))
+                        conn.commit()
 
-            if not result:
-                rootLogger.info(f"Нет доступных чатов для обработки для {session.filename}, ждём...")
+                        # UPDATE без RETURNING (SQLite не поддерживает), затем SELECT
+                        cursor.execute("""
+                            UPDATE channels
+                            SET status = 'processing'
+                            WHERE id = (
+                                SELECT id FROM channels WHERE status = 'pending' LIMIT 1
+                            )
+                        """)
+                        conn.commit()
+                        cursor.execute("""
+                            SELECT link FROM channels
+                            WHERE status = 'processing'
+                            ORDER BY id LIMIT 1
+                        """)
+                        result = cursor.fetchone()
+                        if result:
+                            chat = result[0]
+                            is_new_channel = True
+                        else:
+                            await asyncio.sleep(300)
+                            continue
+                conn.commit()
+
+            if not chat:
                 await asyncio.sleep(300)
                 continue
-
-            chat = result[0]
-            cursor.execute("""
-                UPDATE channels
-                SET status = 'processing'
-                WHERE link = ?
-            """, (chat,))
-            conn.commit()
 
             try:
                 chat_id = None
@@ -989,12 +1016,19 @@ async def worker_liking_stories(session: Session):
                 write_daily_log(log_msg)
                 await bot.send_message(chat_id, log_msg)
 
-                cursor.execute("""
-                    UPDATE channels
-                    SET status = 'processed', last_processed = ?
-                    WHERE link = ?
-                """, (datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f"), chat))
-                conn.commit()
+                # Обновление статуса канала (исправленный SELECT)
+                async with chat_lock:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT current_processed FROM channels WHERE link = ?", (chat,))
+                    row = cursor.fetchone()
+                    curr_processed = row[0] if row else 0
+                    if curr_processed >= accounts_per_channel:
+                        cursor.execute("""
+                            UPDATE channels
+                            SET status = 'processed', last_processed = ?
+                            WHERE link = ?
+                        """, (datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f"), chat))
+                    conn.commit()
 
                 await asyncio.sleep(8)
 
@@ -1239,35 +1273,16 @@ async def check_account_status(callback: atypes.CallbackQuery):
     await bot.send_message(chat_id, stats_msg)
     await callback.message.edit_text(stats_msg)
 
+kb_company_menu = atypes.InlineKeyboardMarkup(inline_keyboard=[
+    [atypes.InlineKeyboardButton(text="Выбрать компании для работы", callback_data="toggle_companies")],
+    [atypes.InlineKeyboardButton(text="Настроить параметры", callback_data="setup_params")],
+    [atypes.InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+])
+
 @dp.callback_query((F.from_user.id == owner_id) & (F.data == "toggle_story_liking"))
 async def toggle_story_liking(callback: atypes.CallbackQuery, state: FSMContext):
-    global selected_company, company_active, liking_tasks, sessions
-    if not selected_company:
-        await callback.message.edit_text("Сначала выберите компанию с помощью /select_company.")
-        return
-
-    # Сохраняем начальное состояние выбранных компаний
-    await state.set_state(CompanyToggleState.selected_companies)
-    await state.update_data(selected_companies=list(company_active.keys()))  # Изначально все компании
-
-    # Формируем клавиатуру
-    keyboard = []
-    for company in company_configs.keys():
-        ses = [s for s in sessions if s.company == company and s.me]
-        is_liking = company_active.get(company, False)
-        status = "✅" if is_liking else "❌"
-        button_text = f"{status} {company}"
-        button = InlineKeyboardButton(
-            text=button_text,
-            callback_data=CompanyToggleCallback(action="toggle", company_name=company).pack()
-        )
-        keyboard.append([button])
-
-    done_button = InlineKeyboardButton(text="Готово", callback_data="done_toggling")
-    keyboard.append([done_button])
-
-    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-    await callback.message.edit_text("Выберите компании для переключения лайкинга сторис:", reply_markup=reply_markup)
+    await callback.message.edit_text("Меню управления компаниями:", reply_markup=kb_company_menu)
+    await callback.answer()
 
 # Обработчик переключения статуса компании
 @dp.callback_query((F.from_user.id == owner_id) & (F.data.startswith("company_toggle:")))
@@ -1308,15 +1323,6 @@ async def build_toggle_keyboard(state: FSMContext):
     done_button = InlineKeyboardButton(text="Готово", callback_data="done_toggling")
     keyboard.append([done_button])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-@dp.callback_query((F.from_user.id == owner_id) & (F.data == "toggle_story_liking"))
-async def toggle_story_liking(callback: atypes.CallbackQuery):
-    global selected_company, company_active, liking_tasks, sessions
-    if not selected_company:
-        await callback.message.edit_text("Сначала выберите компанию с помощью /select_company.")
-        return
-    reply_markup = await build_toggle_keyboard()
-    await callback.message.edit_text("Выберите компании для переключения лайкинга сторис:", reply_markup=reply_markup)
 
 @dp.callback_query(ChangeState.select, (F.from_user.id == owner_id) & (F.data.in_({"select_all", "select_selective"})))
 async def sel_accs(callback: atypes.CallbackQuery, state: FSMContext):
@@ -2412,72 +2418,8 @@ async def handle_company_selection(callback: atypes.CallbackQuery):
     await switch_company(callback, company)
 
 @dp.callback_query((F.from_user.id == owner_id) & (F.data == "select_companies_done"))
-async def finish_company_selection(callback: atypes.CallbackQuery, state: FSMContext):
-    global company_active, liking_tasks, sessions
-    data = await state.get_data()
-    selected_companies = data.get('selected_companies', [])
-    if not selected_companies:
-        await callback.message.edit_text("Выберите хотя бы одну компанию.")
-        return
-
-    # Создаём состояния для запроса параметров
-    class CompanyParamsState(StatesGroup):
-        like_probability = State()
-        accounts_per_channel = State()
-
-    async def request_params_for_company(company, message):
-        await state.set_state(CompanyParamsState.like_probability)
-        await state.update_data(current_company=company)
-        await message.edit_text(f"Укажите вероятность лайка для компании {company} (0-100%):")
-
-    @dp.message(CompanyParamsState.like_probability, (F.from_user.id == owner_id))
-    async def process_like_probability(message: atypes.Message, state: FSMContext):
-        try:
-            probability = float(message.text.strip().replace('%', '')) / 100
-            if not 0 <= probability <= 1:
-                raise ValueError("Вероятность должна быть от 0 до 100%")
-            data = await state.get_data()
-            company = data['current_company']
-            company_configs[company]['like_probability'] = probability
-            await state.set_state(CompanyParamsState.accounts_per_channel)
-            await message.reply(f"Укажите количество аккаунтов на канал для компании {company} (1-10):")
-        except ValueError as e:
-            await message.reply(f"Ошибка: {str(e)}. Попробуйте снова (0-100%).")
-
-    @dp.message(CompanyParamsState.accounts_per_channel, (F.from_user.id == owner_id))
-    async def process_accounts_per_channel(message: atypes.Message, state: FSMContext):
-        try:
-            accounts = int(message.text.strip())
-            if not 1 <= accounts <= 10:
-                raise ValueError("Количество аккаунтов должно быть от 1 до 10")
-            data = await state.get_data()
-            company = data['current_company']
-            company_configs[company]['accounts_per_channel'] = accounts
-            save_stats(company)  # Сохраняем конфигурацию
-            selected_companies = data.get('selected_companies', [])
-            selected_companies.remove(company)
-            await state.update_data(selected_companies=selected_companies)
-            if selected_companies:
-                next_company = selected_companies[0]
-                await request_params_for_company(next_company, message)
-            else:
-                await state.clear()
-                # Запускаем задачи для выбранных компаний
-                for company in company_configs.keys():
-                    company_active[company] = company in selected_companies
-                    if company_active[company]:
-                        company_sessions = [s for s in sessions if s.company == company and s.me]
-                        for session in company_sessions:
-                            if not any(task[1] == session for task in liking_tasks):
-                                task = asyncio.create_task(worker_liking_stories(session))
-                                liking_tasks.append((task, session))
-                                rootLogger.info(f"Запущена задача лайкинга для {session.filename} в компании {company}")
-                await message.reply("Все компании настроены и запущены.", reply_markup=kb_menu)
-        except ValueError as e:
-            await message.reply(f"Ошибка: {str(e)}. Попробуйте снова (1-10).")
-
-    await state.update_data(selected_companies=selected_companies[:])
-    await request_params_for_company(selected_companies[0], callback.message)
+async def finish_company_selection(callback: atypes.CallbackQuery):
+    await callback.message.edit_text("Выбор компаний завершён.")
     await callback.answer()
 
 @dp.callback_query((F.from_user.id == owner_id) & (F.data == "select_all_companies"))
@@ -2723,72 +2665,6 @@ async def add_sessions(company, zip_path):
             shutil.rmtree(temp_dir)
         except Exception as e:
             rootLogger.error(f"Ошибка при удалении временной папки {temp_dir}: {str(e)}")
-
-async def check_all_sessions_on_start():
-    global sessions
-    if not sessions:
-        log_msg = "Нет загруженных сессий для проверки."
-        rootLogger.warning(log_msg)
-        write_daily_log(log_msg)
-        return
-    
-    problematic_sessions = []
-    
-    for session in sessions[:]:  # Копируем список, чтобы безопасно удалять элементы
-        try:
-            client = session.app
-            log_msg = f"Проверка статуса сессии {session.filename}..."
-            rootLogger.info(log_msg)
-            write_daily_log(log_msg)
-
-            # Подключаем клиента, если он не подключён
-            if not client.is_connected():
-                await client.connect()
-
-            status, reason = await handle_spam_block(client)
-            log_msg = f"Статус сессии {session.filename}: {status}, причина: {reason or 'нет'}"
-            rootLogger.info(log_msg)
-            write_daily_log(log_msg)
-
-            if status in ["жёлтый", "красный"]:
-                problematic_sessions.append(session)
-                session_path = f"./companies/{session.company}/sessions/{session.filename}"
-                try:
-                    await move_to_spamblocked(session_path)
-                    log_msg = f"Сессия {session.filename} перемещена в ./spamblocked_sessions (статус: {status})"
-                    rootLogger.info(log_msg)
-                    write_daily_log(log_msg)
-                except Exception as e:
-                    log_msg = f"Ошибка при перемещении сессии {session.filename}: {str(e)}"
-                    rootLogger.error(log_msg)
-                    write_daily_log(log_msg)
-            else:  # Зелёный статус
-                me = await client.get_me()
-                session.id = me.id
-                session.me = me
-                log_msg = f"Сессия {session.filename} активна (ID: {me.id})"
-                rootLogger.info(log_msg)
-                write_daily_log(log_msg)
-
-        except Exception as e:
-            log_msg = f"Ошибка при проверке сессии {session.filename}: {str(e)}"
-            rootLogger.error(log_msg)
-            write_daily_log(log_msg)
-            problematic_sessions.append(session)
-
-    # Удаляем проблемные сессии из списка активных
-    for session in problematic_sessions:
-        if session in sessions:
-            sessions.remove(session)
-            log_msg = f"Сессия {session.filename} удалена из активных сессий"
-            rootLogger.info(log_msg)
-            write_daily_log(log_msg)
-
-    if not sessions:
-        log_msg = "Все сессии проблемные. Завершение работы."
-        rootLogger.critical(log_msg)
-        write_daily_log(log_msg)
-        raise SystemExit("Нет активных сессий.")
 
 @dp.message(AddSessionState.add, (F.from_user.id == owner_id))
 async def add_zip_sessions(message: atypes.Message, state: FSMContext):
@@ -3053,8 +2929,139 @@ async def sel_acc(callback: atypes.CallbackQuery, state: FSMContext):
         await callback.message.edit_text("Произошла критическая ошибка.")
     await callback.answer()
 
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "toggle_companies"))
+async def toggle_companies(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(CompanyToggleState.selected_companies)
+    await state.update_data(selected_companies=list(company_active.keys()))
+
+    keyboard = []
+    for company in company_configs.keys():
+        ses = [s for s in sessions if s.company == company and s.me]
+        is_liking = company_active.get(company, False)
+        status = "✅" if is_liking else "❌"
+        button_text = f"{status} {company}"
+        button = InlineKeyboardButton(
+            text=button_text,
+            callback_data=CompanyToggleCallback(action="toggle", company_name=company).pack()
+        )
+        keyboard.append([button])
+
+    keyboard.append([InlineKeyboardButton(text="Готово", callback_data="done_toggling")])
+    kb = atypes.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await callback.message.edit_text("Выберите компании для активации/деактивации:", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "setup_params"))
+async def setup_params(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(SetupParamsState.waiting_value)
+    await state.update_data(selected_companies=[], current_index=0, current_company=None, current_param=None)
+
+    builder = InlineKeyboardBuilder()
+    for company in sorted(company_configs.keys()):
+        builder.row(InlineKeyboardButton(
+            text=f"Не выбрано {company}",
+            callback_data=f"select_setup_{company}"
+        ))
+    builder.row(InlineKeyboardButton(text="Готово", callback_data="setup_done"))
+    await callback.message.edit_text("Выберите компании для настройки параметров:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(SetupParamsState.waiting_value, (F.from_user.id == owner_id) & (F.data.startswith("select_setup_")))
+async def select_setup_company(callback: atypes.CallbackQuery, state: FSMContext):
+    company = callback.data.replace("select_setup_", "")
+    data = await state.get_data()
+    selected = data.get("selected_companies", [])
+    if company in selected:
+        selected.remove(company)
+    else:
+        selected.append(company)
+    await state.update_data(selected_companies=selected)
+
+    builder = InlineKeyboardBuilder()
+    for comp in sorted(company_configs.keys()):
+        is_sel = comp in selected
+        builder.row(InlineKeyboardButton(
+            text=f"{'Выбрано' if is_sel else 'Не выбрано'} {comp}",
+            callback_data=f"select_setup_{comp}"
+        ))
+    builder.row(InlineKeyboardButton(text="Готово", callback_data="setup_done"))
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(SetupParamsState.waiting_value, (F.from_user.id == owner_id) & (F.data == "setup_done"))
+async def setup_done(callback: atypes.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("selected_companies", [])
+    if not selected:
+        await callback.message.edit_text("Выберите хотя бы одну компанию.")
+        await callback.answer()
+        return
+
+    await state.update_data(current_index=0)
+    current_company = selected[0]
+    await state.update_data(current_company=current_company, current_param="like_probability")
+    await callback.message.edit_text(
+        f"Для компании '{current_company}':\n"
+        f"Вероятность лайка (0-100, например 80 для 80%):"
+    )
+    await callback.answer()
+
+@dp.message(SetupParamsState.waiting_value, (F.from_user.id == owner_id) & F.text)
+async def handle_setup_value(message: atypes.Message, state: FSMContext):
+    data = await state.get_data()
+    current_param = data.get("current_param")
+    current_company = data.get("current_company")
+    selected = data.get("selected_companies", [])
+    current_index = data.get("current_index", 0)
+
+    try:
+        if current_param == "like_probability":
+            value = float(message.text.strip())
+            if not 0 <= value <= 100:
+                raise ValueError("Должно быть от 0 до 100")
+            company_configs[current_company]["like_probability"] = value / 100
+            # Сохраняем config сразу после like_probability
+            config_file = f"./companies/{current_company}/config.json"
+            with open(config_file, "w", encoding='utf-8') as f:
+                json.dump(company_configs[current_company], f, ensure_ascii=False)
+            rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value / 100}")
+            await message.reply(
+                f"Вероятность лайка для '{current_company}' установлена на {int(value)}%.\n"
+                f"Теперь укажите кол-во аккаунтов на один канал (целое число ≥1):"
+            )
+            await state.update_data(current_param="accounts_per_channel")
+        else:  # accounts_per_channel
+            value = int(message.text.strip())
+            if value < 1:
+                raise ValueError("Должно быть не менее 1")
+            company_configs[current_company]["accounts_per_channel"] = value
+            # Сохраняем config после accounts_per_channel
+            config_file = f"./companies/{current_company}/config.json"
+            with open(config_file, "w", encoding='utf-8') as f:
+                json.dump(company_configs[current_company], f, ensure_ascii=False)
+            rootLogger.info(f"Обновлён параметр {current_param} для {current_company}: {value}")
+            await message.reply(
+                f"Кол-во аккаунтов на канал для '{current_company}' установлено на {value}.\n"
+                f"Настройки завершены."
+            )
+            current_index += 1
+            if current_index < len(selected):
+                next_company = selected[current_index]
+                await state.update_data(current_index=current_index, current_company=next_company, current_param="like_probability")
+                await message.reply(
+                    f"\nДля компании '{next_company}':\n"
+                    f"Вероятность лайка (0-100):"
+                )
+            else:
+                await state.clear()
+                await message.reply("Настройки для всех компаний завершены!")
+                await start(message)
+                return
+    except ValueError as e:
+        await message.reply(f"Ошибка: {str(e)}. Попробуйте снова.")
+        return
+
 try:
     asyncio.run(main())
 except KeyboardInterrupt:
     pass
-

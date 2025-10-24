@@ -29,6 +29,13 @@ from telethon.tl.functions.stories import GetPeerStoriesRequest, ReadStoriesRequ
 rootLogger = logging.getLogger('root')
 rootLogger.setLevel(logging.DEBUG)
 
+def write_daily_log(message):
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_file = f"daily_log_{today}.txt"
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+
+
 formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s]: %(message)s (%(filename)s:%(lineno)d)')
 
 fileHandler = logging.FileHandler("app.log", "w", encoding="utf-8")
@@ -389,13 +396,6 @@ async def show_stats(callback: atypes.CallbackQuery):
     await callback.message.edit_text(stats_text)
     await callback.answer()
 
-
-
-def write_daily_log(message):
-    today = datetime.now().strftime("%Y-%m-%d")
-    log_file = f"daily_log_{today}.txt"
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
 
 def get_stats_text(company):
     stats = company_stats.get(company, {
@@ -813,13 +813,13 @@ async def worker_liking_stories(session: Session):
                         is_new_channel = False
                     else:
                         conn.commit()
-                        # Сброс processed каналов старше 24 часов
+                        # Сброс processed каналов старше 0 часов
                         cursor.execute("""
                             UPDATE channels
                             SET status = 'pending', current_processed = 0
                             WHERE status = 'processed'
                             AND last_processed < ?
-                        """, ((datetime.now(pytz.UTC) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S.%f"),))
+                        """, ((datetime.now(pytz.UTC) - timedelta(hours=0)).strftime("%Y-%m-%d %H:%M:%S.%f"),))
                         conn.commit()
                         # UPDATE без RETURNING (SQLite не поддерживает), затем SELECT
                         cursor.execute("""

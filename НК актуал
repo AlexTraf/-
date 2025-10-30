@@ -1,0 +1,3757 @@
+import asyncio
+from datetime import datetime, timedelta, UTC
+import re
+import sys
+import os
+from os import listdir, path, makedirs, rename
+from telethon import TelegramClient, events, functions, types
+from telethon.errors import ChannelPrivateError, UserBannedInChannelError, FloodWaitError, ForbiddenError, MessageIdInvalidError, UsernameInvalidError, UsernameNotOccupiedError, UserDeactivatedBanError, InviteRequestSentError, UsernameOccupiedError, UserNotParticipantError, ChannelPrivateError, TypeNotFoundError
+from telethon.tl.types import PeerChannel,ChannelParticipantBanned, InputPeerUser, InputPeerChat, InputChannel
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telethon.tl.functions.channels import CreateChannelRequest, GetParticipantRequest, LeaveChannelRequest
+from telethon.tl.functions.account import UpdatePersonalChannelRequest
+from aiogram import Bot, Dispatcher, F
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram import types as atypes
+from langchain.schema import HumanMessage, SystemMessage
+from langchain_community.chat_models import GigaChat
+import zipfile
+import logging   
+import random
+import json
+import requests
+import tempfile
+import random
+import string
+from datetime import datetime
+import pandas as pd
+import openpyxl
+import shutil
+import json
+import time
+
+# логгер
+rootLogger = logging.getLogger('root')
+rootLogger.setLevel(logging.DEBUG)  # Ловим всё для файла
+
+formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s]: %(message)s (%(filename)s:%(lineno)d)')
+
+fileHandler = logging.FileHandler("app.log", "w", encoding="utf-8")
+fileHandler.setLevel(logging.DEBUG)  # В файл всё
+fileHandler.setFormatter(formatter)
+rootLogger.addHandler(fileHandler)
+
+consoleHandler = logging.StreamHandler(sys.stdout)
+consoleHandler.setLevel(logging.INFO)  # В консоль INFO и выше
+consoleHandler.setFormatter(formatter)
+rootLogger.addHandler(consoleHandler)
+
+logging.getLogger('telethon').setLevel(logging.WARNING)
+# переменные
+config = {}
+with open("config.json", "r", encoding='utf-8') as config_file:
+    config = json.load(config_file)
+scheduler = AsyncIOScheduler()
+bot = Bot(config["token"])
+dp = Dispatcher()
+owner_id = config["owner_id"]
+chat_id = config["chat_id"]
+giga_chat = GigaChat(
+    credentials="ZGQyZTllNWQtOTRlYy00YTk5LTgyOWQtOGI2ZWEwMzYxMGU1OjhjY2FiYzAxLWNjYjEtNGY5MC1iN2QwLTU4NzNmMWIxNmI5Yg==",
+    verify_ssl_certs=False
+)
+
+default_company_config: dict = {
+    "filter": None,
+    "timeout": 60
+}
+
+MIN_POST_LIMIT: int = 300
+POST_SLEEP_TIME_SECOND: int = 120
+
+stats_lock = asyncio.Lock
+commenting_paused = False
+sessions = []
+default_prompt = "Ты эмоциональный и впечатлительный человек и тебе нужно писать комментарии под телеграм пост. Ты получаешь пост и пишешь под него эмоциональный комментарий на русском размером строго до 10 слов. Либо отвечаешь на вопрос в конце поста, либо благодаришь за пост."
+api_id = 28229033
+api_hash = "00dda765bff2ad74e70cc0bb68eb6e6b"
+read = True
+selected_company = None
+prompts = {}
+channels = {}
+channels_subscribed = {}
+company_configs = {}
+created_channels = {}
+logged_no_sessions = {}
+bad_words = []
+blacklist_file_path = "bad_words.txt"
+if os.path.exists(blacklist_file_path):
+    try:
+        with open(blacklist_file_path, "r", encoding='utf-8') as blacklist_file:
+            bad_words = [word.strip().lower() for word in blacklist_file.read().splitlines() if word.strip()]
+        log_msg = f"Загружен чёрный список из {blacklist_file_path}: {len(bad_words)} слов"
+        rootLogger.info(log_msg)
+    except Exception as e:
+        log_msg = f"Ошибка при загрузке чёрного списка из {blacklist_file_path}: {str(e)}"
+        rootLogger.error(log_msg)
+else:
+    log_msg = f"Файл {blacklist_file_path} не найден, чёрный список пустой"
+    rootLogger.warning(log_msg)
+
+TRANS_TABLE = {
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e', 'ж': 'zh',
+    'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
+    'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'ts',
+    'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu',
+    'я': 'ya'
+}
+
+# Информация об устройствах для эмуляции
+DEVICES_INFO = [
+    {"model": "iPhone 13 Pro Max", "system_version": "18.2", "app_version": "11.2"},
+    {"model": "iPhone XR", "system_version": "18.1", "app_version": "11.2"},
+    {"model": "iPhone 16 Pro", "system_version": "17.2", "app_version": "11.2"}
+]
+
+# клавиатура
+kb_menu = atypes.InlineKeyboardMarkup(inline_keyboard=[
+    [atypes.InlineKeyboardButton(text="Добавить каналы для захода", callback_data="add_channels")],
+    [atypes.InlineKeyboardButton(text="Добавить сессии", callback_data="add_sessions")],
+    [atypes.InlineKeyboardButton(text="Добавить ключи", callback_data="add_keys")],
+    [atypes.InlineKeyboardButton(text="Изменить детали сессий", callback_data="change_sessions")],
+    [atypes.InlineKeyboardButton(text="Выбрать другую компанию", callback_data="change_company")],
+    [atypes.InlineKeyboardButton(text="Статистика аккаунтов", callback_data="account_stats")],
+    [atypes.InlineKeyboardButton(text="Проверить состояние аккаунтов", callback_data="check_account_status")],
+    [atypes.InlineKeyboardButton(text="Дополнительные параметры", callback_data="company_settings")],
+    [atypes.InlineKeyboardButton(text="Отправить ЛС", callback_data="send_pm")]  # Новая кнопка
+])
+
+kb_change_settings = atypes.InlineKeyboardMarkup(inline_keyboard=[
+    [atypes.InlineKeyboardButton(text="Изменить имя аккаунтов", callback_data="change_fname")],
+    [atypes.InlineKeyboardButton(text="Изменить био аккаунтов", callback_data="change_bio")],
+    [atypes.InlineKeyboardButton(text="Изменить фамилию аккаунтов", callback_data="change_lname")],
+    [atypes.InlineKeyboardButton(text="Удалить фото аккаунтов", callback_data="delete_avatar")],
+    [atypes.InlineKeyboardButton(text="Поставить новое фото аккаунтов", callback_data="change_avatar")],
+    [atypes.InlineKeyboardButton(text="Изменить промпты аккаунтов", callback_data="change_prompts")],
+    [atypes.InlineKeyboardButton(text="Добавить канал", callback_data="add_channel")],
+    [atypes.InlineKeyboardButton(text="Собрать статистику просмотров", callback_data="collect_created_views_stats")],
+    [atypes.InlineKeyboardButton(text="Отписаться от всех каналов", callback_data="unsubscribe_all")],
+    [atypes.InlineKeyboardButton(text="Перемешать каналы", callback_data="shuffle_channels")],
+    [atypes.InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+])
+
+kb_company_config = atypes.InlineKeyboardMarkup(inline_keyboard=[
+    [atypes.InlineKeyboardButton(text="Изменить фильтр по ключевым словам", callback_data="company_change_filter")],
+    [atypes.InlineKeyboardButton(text="Изменить время ответа на пост", callback_data="company_change_timeout")],
+    [atypes.InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+])
+
+kb_all_or_select = atypes.InlineKeyboardMarkup(inline_keyboard=[
+    [atypes.InlineKeyboardButton(text="Все аккаунты", callback_data="select_all")],
+    [atypes.InlineKeyboardButton(text="Выбранные аккаунты", callback_data="select_selective")],
+    [atypes.InlineKeyboardButton(text="Назад", callback_data="back_to_channel")]
+])
+
+kb_add_channels = atypes.InlineKeyboardMarkup(inline_keyboard=[
+    [atypes.InlineKeyboardButton(text="Добавить каналы из файла Excel", callback_data="add_channels_excel")],
+    [atypes.InlineKeyboardButton(text="Добавить каналы текстом", callback_data="add_channels_text")],
+    [atypes.InlineKeyboardButton(text="Назад", callback_data="back_to_change")]
+])
+
+# классы
+class FilterChannelsState(StatesGroup):
+    excel = State()  # Ожидание Excel-файла
+    keywords = State()  # Ожидание ключевых слов
+
+class SendPMState(StatesGroup):
+    username = State()  # Состояние для ввода юзернейма
+    message = State()   # Состояние для ввода текста сообщения
+
+class CollectViewsStatsState(StatesGroup):
+    channel_name = State()  # Состояние для ввода названия канала
+
+class CreateCompanyState(StatesGroup):
+    name = State()
+
+class CompanyConfigChangeState(StatesGroup):
+    change = State()
+    value = State()
+
+class AddPrivateChannelState(StatesGroup):
+    name = State()
+    avatar = State()
+    posts = State()
+    select = State()
+    confirm = State()
+
+class AddSessionState(StatesGroup):
+    add = State()
+
+
+class AddChannelState(StatesGroup):
+    add = State()
+
+class ChangeState(StatesGroup):
+    change = State()
+    value = State()
+    select = State()
+
+class Session:
+    def __init__(self, client, filename: str, company: str) -> None:
+        self.app = client
+        self.id = None
+        self.me = None
+        self.unblocked_at: datetime | None = None
+        self.blocked = False
+        self.sent_appelation = False
+        self.filename = filename
+        self.company = company
+        self.limit = 0
+        self.flood_wait_until: datetime | None = None
+        self.comments_today = 0
+        self.rest_until: datetime | None = None
+        self.subscriptions = []
+        # Загружаем commented_posts из файла, если он есть
+        self.commented_posts_file = f"./companies/{company}/sessions/{filename}.commented.json"
+        if os.path.exists(self.commented_posts_file):
+            try:
+                with open(self.commented_posts_file, "r", encoding='utf-8') as f:
+                    self.commented_posts = json.load(f)
+            except Exception as e:
+                log_msg = f"Ошибка загрузки commented_posts для {filename}: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                self.commented_posts = []
+        else:
+            self.commented_posts = []
+
+    def save_commented_posts(self):
+        """Сохраняет commented_posts в файл."""
+        try:
+            with open(self.commented_posts_file, "w", encoding='utf-8') as f:
+                json.dump(self.commented_posts, f, ensure_ascii=False)
+        except Exception as e:
+            log_msg = f"Ошибка сохранения commented_posts для {self.filename}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+
+def make_proxy(x):
+    host, port, username, password = x.split(":")
+    return ("http", host, int(port), True, username, password)
+
+# функции загрузки
+with open(f"proxies.txt", "r", encoding='utf-8') as proxy_file:
+    global proxies
+    proxy_content = proxy_file.read().replace("\r", "")
+    proxies = list(map(make_proxy, proxy_content.split("\n")))
+
+for company_path in listdir("./companies"):
+    if path.exists(f"./companies/{company_path}/config.json"):
+        with open(f"./companies/{company_path}/config.json", "r", encoding='utf-8') as channels_file:
+            company_configs[company_path] = json.load(channels_file)
+    else:
+        company_configs[company_path] = default_company_config
+
+for company_path in listdir("./companies"):
+    with open(f"./companies/{company_path}/channels.txt", "r", encoding='utf-8') as channels_file:
+        channels[company_path] = channels_file.read().replace("\r", "").split("\n")  # Убираем только \r, оставляем ссылки как есть
+
+for company_path in listdir("./companies"):
+    if path.exists(f"./companies/{company_path}/channels_sub.txt"):
+        with open(f"./companies/{company_path}/channels_sub.txt", "r", encoding='utf-8') as channels_file:
+            channels_subscribed[company_path] = channels_file.read().replace("\r", "").replace("https://t.me/", "@").split("\n")
+
+for company_path in listdir("./companies"):
+    if path.exists(f"./companies/{company_path}/prompts.json"):
+        with open(f"./companies/{company_path}/prompts.json", "r", encoding="utf-8") as prompts_file:
+            prompts[company_path] = json.load(prompts_file)
+    else:
+        prompts[company_path] = {}
+
+# вспомогательные функции
+def write_daily_log(message):
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_file = f"daily_log_{today}.txt"
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+
+def get_all_stats():
+    global sessions, channels, channels_subscribed
+    stats = []
+    total_remaining_channels = 0
+    total_subscribed_channels = 0
+    total_accounts = 0
+    total_comments_today = 0
+    total_joins_today = 0
+
+    for company in company_configs.keys():
+        # Получаем активные сессии для компании
+        company_sessions = list(filter(lambda x: x.me is not None and x.company == company, sessions))
+        company_deactivated = list(filter(lambda x: x.me is None and x.company == company, sessions))
+        
+        # Количество аккаунтов (активные + деактивированные)
+        accounts_count = len(company_sessions) + len(company_deactivated)
+        
+        # Комментарии за день (суммируем comments_today для всех активных сессий)
+        comments_today = sum(s.comments_today for s in company_sessions)
+        
+        # Подписки за день (суммируем joins_today для всех активных сессий)
+        joins_today = sum(s.joins_today for s in company_sessions)
+        
+        # Каналы, оставшиеся в базе (channels[company])
+        remaining_channels = len(channels.get(company, [])) if company in channels else 0
+        
+        # Подписанные каналы (channels_subscribed[company])
+        subscribed_channels = len(channels_subscribed.get(company, [])) if company in channels_subscribed else 0
+
+        # Добавляем статистику для компании
+        stats.append(f"Компания: {company}")
+        stats.append(f"Каналов осталось: {remaining_channels}")
+        stats.append(f"Подписанных каналов: {subscribed_channels}")
+        stats.append(f"Аккаунтов: {accounts_count}")
+        stats.append(f"Комментариев за день: {comments_today}")
+        stats.append(f"Подписок за день: {joins_today}")
+        stats.append("")
+
+        # Обновляем общие счетчики
+        total_remaining_channels += remaining_channels
+        total_subscribed_channels += subscribed_channels
+        total_accounts += accounts_count
+        total_comments_today += comments_today
+        total_joins_today += joins_today
+
+    # Добавляем общую статистику
+    stats.append("Общая статистика по всем компаниям:")
+    stats.append(f"Каналов осталось: {total_remaining_channels}")
+    stats.append(f"Подписанных каналов: {total_subscribed_channels}")
+    stats.append(f"Аккаунтов: {total_accounts}")
+    stats.append(f"Комментариев за день: {total_comments_today}")
+    stats.append(f"Подписок за день: {total_joins_today}")
+
+    return "\n".join(stats)
+
+def transliterate(text):
+    result = ''
+    for char in text.lower():
+        result += TRANS_TABLE.get(char, char)  # Если символ не русский, оставляем как есть
+    return ''.join(c for c in result if c.isalpha() or c.isspace()).replace(" ", "")
+
+def shuffle(array):
+    a = array.copy()
+    random.shuffle(a)
+    return a
+
+def make_client(session) -> TelegramClient:
+    proxy = random.choice(proxies) if proxies else None
+    device = random.choice(DEVICES_INFO) if 'DEVICES_INFO' in globals() else {"model": "iPhone 13 Pro Max", "system_version": "18.2", "app_version": "11.2"}
+    client = TelegramClient(
+        session=session,
+        api_id=api_id,
+        api_hash=api_hash,
+        proxy=proxy,
+        device_model=device["model"],
+        system_version=device["system_version"],
+        app_version=device["app_version"],
+        lang_code="ru",
+        system_lang_code="ru-RU"
+    )
+    log_msg = f"Регистрация обработчиков для сессии: {session}"
+    rootLogger.info(log_msg)
+    write_daily_log(log_msg)
+
+    # Получаем компанию для этой сессии
+    session_filename = os.path.basename(session)
+    session_company = next((s.company for s in sessions if s.filename == session_filename), None)
+
+    if session_company and session_company in channels:
+        # Получаем список каналов для компании и фильтруем только валидные каналы
+        channel_list = channels[session_company]
+        valid_channels = []
+        for channel in channel_list:
+            if channel and (channel.startswith('@') or channel.startswith('https://t.me/')):
+                # Нормализуем канал, если он начинается с https://t.me/
+                normalized_channel = channel.replace('https://t.me/', '@').strip()
+                valid_channels.append(normalized_channel)
+            else:
+                log_msg = f"Пропущен некорректный канал для компании {session_company}: {channel}"
+                rootLogger.warning(log_msg)
+                write_daily_log(log_msg)
+
+        if valid_channels:
+            # Регистрируем обработчики только для валидных каналов
+            client.add_event_handler(on_spambot_message, events.NewMessage(chats=178220800))
+            client.add_event_handler(getpost, events.NewMessage(incoming=True, chats=valid_channels))
+            client.add_event_handler(on_banned_user, events.ChatAction(chats=valid_channels))
+            client.add_event_handler(on_ban_notify, events.Raw)
+            log_msg = f"Обработчики зарегистрированы для сессии {session_filename} с каналами: {', '.join(valid_channels[:3])}..."
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+        else:
+            log_msg = f"Нет валидных каналов для компании {session_company} в сессии {session_filename}, регистрируем обработчики без каналов"
+            rootLogger.warning(log_msg)
+            write_daily_log(log_msg)
+            client.add_event_handler(on_spambot_message, events.NewMessage(chats=178220800))
+            client.add_event_handler(getpost, events.NewMessage(incoming=True))
+            client.add_event_handler(on_banned_user, events.ChatAction())
+            client.add_event_handler(on_ban_notify, events.Raw)
+    else:
+        log_msg = f"Не найдена компания для сессии {session_filename}, регистрируем обработчики без каналов"
+        rootLogger.warning(log_msg)
+        write_daily_log(log_msg)
+        client.add_event_handler(on_spambot_message, events.NewMessage(chats=178220800))
+        client.add_event_handler(getpost, events.NewMessage(incoming=True))
+        client.add_event_handler(on_banned_user, events.ChatAction())
+        client.add_event_handler(on_ban_notify, events.Raw)
+
+    return client
+
+# аккаунты
+@dp.message(SendPMState.username, (F.from_user.id == owner_id))
+async def process_pm_username(message: atypes.Message, state: FSMContext):
+    username = message.text.strip()
+    if not username:
+        await message.reply("Юзернейм или ID не может быть пустым.")
+        return
+    await state.clear()
+
+    ses = [s for s in sessions if s.me and s.company == selected_company]
+    if not ses:
+        await message.reply(f"В компании {selected_company} нет активных сессий.")
+        return
+
+    await message.reply(f"Отправка сообщения '{username}' от {len(ses)} аккаунтов началась...")
+    success_count = 0
+    for session in ses:
+        try:
+            user = await session.app.get_entity(username)
+            await session.app(functions.contacts.AddContactRequest(id=user.id, first_name=user.first_name or "Contact", last_name=user.last_name or "", phone=user.phone or ""))
+            log_msg = f"{session.filename} добавил {username} в контакты"
+            rootLogger.info(log_msg); write_daily_log(log_msg)
+            await session.app.send_message(username, "1")
+            log_msg = f"{session.filename} отправил сообщение {username}"
+            rootLogger.info(log_msg); write_daily_log(log_msg)
+            success_count += 1
+        except Exception as e:
+            log_msg = f"Ошибка для {session.filename} с {username}: {str(e)}"
+            rootLogger.error(log_msg); write_daily_log(log_msg); await bot.send_message(chat_id, log_msg)
+        await asyncio.sleep(1)
+
+    log_msg = f"Отправка завершена: {success_count}/{len(ses)} успешно"
+    rootLogger.info(log_msg); write_daily_log(log_msg); await bot.send_message(chat_id, log_msg)
+    await message.reply(f"Отправка завершена для {len(ses)} аккаунтов.")
+    await start(message)
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "collect_created_views_stats"))
+async def start_collect_created_views_stats(callback: atypes.CallbackQuery):
+    if not selected_company:
+        await callback.message.edit_text("Сначала выберите компанию.")
+        await callback.answer()
+        return
+    await callback.answer()
+    msg = await callback.message.edit_text("Сбор статистики по привязанным каналам начался...")
+    await collect_created_views_stats(msg)
+    await start(callback.message)
+
+@dp.message(CollectViewsStatsState.channel_name, (F.from_user.id == owner_id))
+async def process_channel_name(message: atypes.Message, state: FSMContext):
+    channel_name = message.text.strip()
+    if not channel_name:
+        await message.reply("Название канала не может быть пустым. Попробуйте снова.")
+        return
+
+    ses = [s for s in sessions if s.me and s.company == selected_company]
+    if not ses:
+        await message.reply(f"В компании {selected_company} нет активных сессий.")
+        await state.clear()
+        return
+
+    # Логируем количество сессий и их имена
+    rootLogger.info(f"Найдено {len(ses)} активных сессий для компании {selected_company}: {[s.filename for s in ses]}")
+
+    # Ищем канал по названию среди всех сессий
+    channel_id = None
+    channel_found = None
+    session_with_channel = None
+    for session in ses:
+        rootLogger.info(f"Поиск канала '{channel_name}' в сессии {session.filename}")
+        try:
+            async for dialog in session.app.iter_dialogs():
+                if isinstance(dialog.entity, types.Channel) and dialog.entity.title == channel_name:
+                    channel_found = dialog.entity
+                    channel_id = channel_found.id
+                    session_with_channel = session
+                    rootLogger.info(f"Канал '{channel_name}' найден в сессии {session.filename} с ID {channel_id}")
+                    break
+            if channel_id:  # Прерываем после первой находки
+                break
+        except Exception as e:
+            log_msg = f"Ошибка при поиске канала '{channel_name}' в сессии {session.filename}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            continue
+
+    if not channel_id:
+        await message.reply(f"Канал с названием '{channel_name}' не найден ни в одном аккаунте компании {selected_company}.")
+        await state.clear()
+        await start(message)
+        return
+
+    await message.reply(f"Сбор статистики просмотров для канала '{channel_name}' (ID {channel_id}) начался...")
+    await collect_created_views_stats(message, session_with_channel, channel_id, channel_name)
+
+    # Сохраняем найденный канал в created_channels
+    created_channels.setdefault(selected_company, [])
+    if not any(ch["id"] == channel_id for ch in created_channels[selected_company]):
+        created_channels[selected_company].append({"id": channel_id, "name": channel_name})
+        with open(f"./companies/{selected_company}/created_channels.json", "w", encoding="utf-8") as file:
+            json.dump(created_channels[selected_company], file, ensure_ascii=False)
+        log_msg = f"Канал '{channel_name}' (ID {channel_id}) добавлен в created_channels для компании {selected_company}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+
+    await state.clear()
+    await start(message)
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "send_pm"))
+async def start_send_pm(callback: atypes.CallbackQuery, state: FSMContext):
+    if not selected_company:
+        await callback.message.edit_text("Сначала выберите компанию.")
+        return
+    await state.set_state(SendPMState.username)
+    await callback.message.edit_text("Отправьте юзернейм или ID пользователя, которому отправить сообщение:")
+    await callback.answer()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "check_account_status"))
+async def check_account_status(callback: atypes.CallbackQuery):
+    global selected_company, sessions
+    if not selected_company:
+        await callback.message.edit_text("Сначала выберите компанию.")
+        return
+
+    log_msg = f"Начат процесс проверки состояния аккаунтов для компании {selected_company}"
+    rootLogger.info(log_msg)
+    write_daily_log(log_msg)
+
+    company_sessions = [s for s in sessions if s.company == selected_company and s.app]
+
+    if not company_sessions:
+        await callback.message.edit_text(f"В компании {selected_company} нет активных сессий.")
+        return
+
+    await callback.message.edit_text(f"Проверка состояния аккаунтов для компании {selected_company}...")
+
+    checked_count = 0
+    green_count = 0
+    yellow_count = 0
+    red_count = 0
+    status_report = []
+
+    for session in company_sessions:
+        status, move_to = await check_session_status(session)
+        checked_count += 1
+        status_report.append(f"{session.filename}: {status} (действие: {move_to or 'оставить'})")
+        
+        if move_to or status == "жёлтый":
+            session_path = f"./companies/{session.company}/sessions/{session.filename}"
+            if move_to == "frozen":
+                await move_session(session_path, "./frozen_accs", session)
+            elif move_to == "spamblocked" or status == "жёлтый":
+                await move_session(session_path, "./spamblocked_sessions", session)
+            elif move_to == "banned":
+                await move_session(session_path, "./banned_sessions", session)
+            sessions.remove(session)
+            log_msg = f"Сессия {session.filename} перемещена в ./{move_to or 'spamblocked'}_sessions (статус: {status})"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            if move_to == "spamblocked" or status == "жёлтый":
+                yellow_count += 1
+            elif move_to in ["frozen", "banned"]:
+                red_count += 1
+        else:
+            log_msg = f"Сессия {session.filename} осталась активной (статус: {status})"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            green_count += 1
+
+    # Формируем отчёт
+    stats_msg = (f"Проверка состояния аккаунтов для компании {selected_company} завершена:\n"
+                 f"- Проверено аккаунтов: {checked_count}\n"
+                 f"- Зелёных (активных): {green_count}\n"
+                 f"- Жёлтых (ограниченных): {yellow_count}\n"
+                 f"- Красных (заблокированных/замороженных): {red_count}\n"
+                 f"Детали:\n" + "\n".join(status_report))
+    rootLogger.info(stats_msg)
+    write_daily_log(stats_msg)
+    await callback.message.edit_text(stats_msg)
+
+@dp.callback_query(ChangeState.select, (F.from_user.id == owner_id) & (F.data.in_({"select_all", "select_selective"})))
+async def sel_accs(callback: atypes.CallbackQuery, state: FSMContext):
+    global sessions
+    report_sent = False  # Флаг для отслеживания отправки успешного отчета
+    try:
+        # Получаем активные сессии для текущей компании
+        ses = list(filter(lambda x: x.me is not None and x.company == selected_company, sessions))
+        if not ses:
+            await bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                text="Нет активных сессий для этой компании. Добавьте сессии или проверьте настройки."
+            )
+            await state.clear()
+            await start(callback.message)
+            return
+
+        data = await state.get_data()
+        change = data.get("change", "")  # Получаем тип изменения из состояния
+
+        if callback.data == "select_all":
+            await state.update_data(select=[int(session.me.id) for session in ses])
+            log_msg = f"Выбраны все аккаунты для компании {selected_company}: {len(ses)} аккаунтов"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            try:
+                # Пытаемся применить изменения с несколькими попытками
+                max_attempts = 5  # Увеличиваем до 5 попыток для большей надежности
+                attempt = 0
+                while attempt < max_attempts:
+                    try:
+                        await apply_data(callback, state, change=change)  # Передаем change
+                        break  # Если успешно, выходим из цикла
+                    except (ForbiddenError, ValueError) as e:
+                        if "query is too old" in str(e) or "response timeout expired" in str(e):
+                            attempt += 1
+                            if attempt < max_attempts:
+                                log_msg = f"Попытка {attempt}/{max_attempts}: Telegram отклонил запрос (query is too old), повтор через 3 секунды"
+                                rootLogger.warning(log_msg)
+                                write_daily_log(log_msg)
+                                await asyncio.sleep(3)
+                                continue
+                            else:
+                                log_msg = f"Не удалось применить изменения после {max_attempts} попыток для компании {selected_company}"
+                                rootLogger.error(log_msg)
+                                write_daily_log(log_msg)
+                                await bot.edit_message_text(
+                                    chat_id=callback.message.chat.id,
+                                    message_id=callback.message.message_id,
+                                    text="Произошла ошибка при применении изменений. Попробуйте еще раз позже."
+                                )
+                                return
+                        raise
+                    except Exception as e:
+                        log_msg = f"ОШИБКА: Не удалось применить изменения для всех аккаунтов: {str(e)}"
+                        rootLogger.error(log_msg)
+                        write_daily_log(log_msg)
+                        await bot.edit_message_text(
+                            chat_id=callback.message.chat.id,
+                            message_id=callback.message.message_id,
+                            text="Произошла ошибка при применении изменений. Обратитесь к разработчику."
+                        )
+                        raise
+                # Отправляем отчет с безопасной отправкой сообщения и указанием количества успешных обновлений
+                report_text = f"Действия применены к {len(ses)} {'сессии' if len(ses) == 1 else 'сессиям'} из {len(ses)}"
+                attempt = 0
+                while attempt < max_attempts:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=callback.message.chat.id,
+                            message_id=callback.message.message_id,
+                            text=report_text
+                        )
+                        log_msg = f"Отчет успешно отправлен: {report_text}"
+                        rootLogger.info(log_msg)
+                        write_daily_log(log_msg)
+                        report_sent = True
+                        break
+                    except (ForbiddenError, ValueError) as e:
+                        if "query is too old" in str(e) or "response timeout expired" in str(e):
+                            attempt += 1
+                            if attempt < max_attempts:
+                                log_msg = f"Попытка {attempt}/{max_attempts}: Telegram отклонил запрос (query is too old), повтор через 3 секунды"
+                                rootLogger.warning(log_msg)
+                                write_daily_log(log_msg)
+                                await asyncio.sleep(3)
+                                continue
+                            else:
+                                log_msg = f"Не удалось отправить отчет после {max_attempts} попыток: {str(e)}"
+                                rootLogger.error(log_msg)
+                                write_daily_log(log_msg)
+                                await bot.send_message(chat_id, f"Не удалось отправить отчет, но изменения применены к {len(ses)} {'сессии' if len(ses) == 1 else 'сессиям'} из {len(ses)}. Ошибка: {str(e)}")
+                                break
+                        elif "message is not modified" in str(e):
+                            log_msg = f"Telegram отклонил запрос (message is not modified), игнорируем"
+                            rootLogger.warning(log_msg)
+                            write_daily_log(log_msg)
+                            report_sent = True
+                            break
+                        raise
+                    except Exception as e:
+                        log_msg = f"Ошибка при отправке отчета: {str(e)}"
+                        rootLogger.error(log_msg)
+                        write_daily_log(log_msg)
+                        await bot.send_message(chat_id, f"Не удалось отправить отчет, но изменения применены к {len(ses)} {'сессии' if len(ses) == 1 else 'сессиям'} из {len(ses)}. Ошибка: {str(e)}")
+                        break
+            except Exception as e:
+                log_msg = f"Критическая ошибка в sel_accs при применении изменений для компании {selected_company}: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                if not report_sent:
+                    attempt = 0
+                    while attempt < max_attempts:
+                        try:
+                            await bot.edit_message_text(
+                                chat_id=callback.message.chat.id,
+                                message_id=callback.message.message_id,
+                                text="Произошла критическая ошибка. Обратитесь к разработчику."
+                            )
+                            break
+                        except (ForbiddenError, ValueError) as e:
+                            if "query is too old" in str(e) or "response timeout expired" in str(e):
+                                attempt += 1
+                                if attempt < max_attempts:
+                                    log_msg = f"Попытка {attempt}/{max_attempts}: Telegram отклонил запрос (query is too old), повтор через 3 секунды"
+                                    rootLogger.warning(log_msg)
+                                    write_daily_log(log_msg)
+                                    await asyncio.sleep(3)
+                                    continue
+                                else:
+                                    log_msg = f"Не удалось отправить сообщение об ошибке после {max_attempts} попыток: {str(e)}"
+                                    rootLogger.error(log_msg)
+                                    write_daily_log(log_msg)
+                                    await bot.send_message(chat_id, "Произошла критическая ошибка. Обратитесь к разработчику.")
+                                    break
+                            elif "message is not modified" in str(e):
+                                log_msg = f"Telegram отклонил запрос (message is not modified), игнорируем"
+                                rootLogger.warning(log_msg)
+                                write_daily_log(log_msg)
+                                break
+                            raise
+                        except Exception as e:
+                            log_msg = f"Ошибка при отправке сообщения об ошибке: {str(e)}"
+                            rootLogger.error(log_msg)
+                            write_daily_log(log_msg)
+                            await bot.send_message(chat_id, "Произошла критическая ошибка. Обратитесь к разработчику.")
+                            break
+        elif callback.data == "select_selective":
+            await state.update_data(select=[])  # Инициализируем пустой список для селективного выбора
+            builder = InlineKeyboardBuilder()
+            for session in ses:
+                me = session.me
+                builder.row(atypes.InlineKeyboardButton(
+                    text=f"❌ {me.first_name}{' ' + me.last_name if me.last_name else ''} ({'@' + me.username if me.username else '+' + me.phone_number if me.phone_number else str(me.id)} {me.id})",
+                    callback_data=f"select_{me.id}"))
+            builder.row(atypes.InlineKeyboardButton(text="✅ Готово", callback_data="select_done"))
+            builder.row(atypes.InlineKeyboardButton(text="Выбрать все", callback_data="select_all"))
+            builder.row(atypes.InlineKeyboardButton(text="Выбранные аккаунты", callback_data="select_selective"))
+            try:
+                await bot.edit_message_text(
+                    chat_id=callback.message.chat.id,
+                    message_id=callback.message.message_id,
+                    text="Выберите аккаунты, к которым хотите применить изменения:",
+                    reply_markup=builder.as_markup()
+                )
+                log_msg = f"Переход к выбору конкретных аккаунтов для компании {selected_company}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            except (ForbiddenError, ValueError) as e:
+                if "query is too old" in str(e) or "response timeout expired" in str(e):
+                    log_msg = f"Telegram отклонил запрос (query is too old) при обновлении сообщения для компании {selected_company}"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    await bot.edit_message_text(
+                        chat_id=callback.message.chat.id,
+                        message_id=callback.message.message_id,
+                        text="Произошла временная ошибка. Попробуйте еще раз через несколько секунд."
+                    )
+                elif "message is not modified" in str(e):
+                    log_msg = f"Telegram отклонил запрос (message is not modified) для компании {selected_company}"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    await bot.edit_message_text(
+                        chat_id=callback.message.chat.id,
+                        message_id=callback.message.message_id,
+                        text="Произошла временная ошибка. Продолжаем работу."
+                    )
+                else:
+                    log_msg = f"ОШИБКА: Не удалось обновить сообщение для выбора аккаунтов в компании {selected_company}: {str(e)}"
+                    rootLogger.error(log_msg)
+                    write_daily_log(log_msg)
+                    await bot.edit_message_text(
+                        chat_id=callback.message.chat.id,
+                        message_id=callback.message.message_id,
+                        text="Произошла ошибка при обновлении списка аккаунтов. Попробуйте еще раз."
+                    )
+            except Exception as e:
+                log_msg = f"Критическая ошибка в sel_accs при инициализации селективного выбора для компании {selected_company}: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await bot.edit_message_text(
+                    chat_id=callback.message.chat.id,
+                    message_id=callback.message.message_id,
+                    text="Произошла критическая ошибка. Обратитесь к разработчику."
+                )
+        await callback.answer()
+    except Exception as e:
+        log_msg = f"Критическая ошибка в sel_accs для компании {selected_company}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        if not report_sent:
+            attempt = 0
+            max_attempts = 5
+            while attempt < max_attempts:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=callback.message.chat.id,
+                        message_id=callback.message.message_id,
+                        text="Произошла критическая ошибка. Обратитесь к разработчику."
+                    )
+                    break
+                except (ForbiddenError, ValueError) as e:
+                    if "query is too old" in str(e) or "response timeout expired" in str(e):
+                        attempt += 1
+                        if attempt < max_attempts:
+                            log_msg = f"Попытка {attempt}/{max_attempts}: Telegram отклонил запрос (query is too old), повтор через 3 секунды"
+                            rootLogger.warning(log_msg)
+                            write_daily_log(log_msg)
+                            await asyncio.sleep(3)
+                            continue
+                        else:
+                            log_msg = f"Не удалось отправить сообщение об ошибке после {max_attempts} попыток: {str(e)}"
+                            rootLogger.error(log_msg)
+                            write_daily_log(log_msg)
+                            await bot.send_message(chat_id, "Произошла критическая ошибка. Обратитесь к разработчику.")
+                            break
+                    elif "message is not modified" in str(e):
+                        log_msg = f"Telegram отклонил запрос (message is not modified), игнорируем"
+                        rootLogger.warning(log_msg)
+                        write_daily_log(log_msg)
+                        break
+                    raise
+                except Exception as e:
+                    log_msg = f"Ошибка при отправке сообщения об ошибке: {str(e)}"
+                    rootLogger.error(log_msg)
+                    write_daily_log(log_msg)
+                    await bot.send_message(chat_id, "Произошла критическая ошибка. Обратитесь к разработчику.")
+                    break
+
+async def unsubscribe_all_channels(client: TelegramClient):
+    global sessions
+    me = await client.get_me()  # Получаем текущего пользователя
+    session: Session = list(filter(lambda x: x.me is not None and x.me.id == me.id, sessions))[0]
+    log_msg = f"Инициализация отписки от всех каналов и чатов для сессии {session.filename}"
+    rootLogger.info(log_msg)
+    write_daily_log(log_msg)
+
+    try:
+        # Получаем список всех диалогов (каналы, группы, чаты обсуждений)
+        async for dialog in client.iter_dialogs():
+            if isinstance(dialog.entity, (types.Channel, types.Chat)):  # Фильтруем каналы и чаты (включая группы)
+                try:
+                    # Проверяем, является ли аккаунт участником диалога
+                    is_member = False
+                    try:
+                        if isinstance(dialog.entity, types.Channel):
+                            participant = await client(functions.channels.GetParticipantRequest(
+                                channel=dialog.entity,
+                                participant=await client.get_input_entity(me)
+                            ))
+                            is_member = participant.participant and not isinstance(participant.participant, types.ChannelParticipantBanned)
+                        elif isinstance(dialog.entity, types.Chat):
+                            participant = await client(functions.messages.GetFullChatRequest(
+                                chat_id=dialog.entity.id
+                            ))
+                            is_member = dialog.entity.participants_count > 0 and not dialog.entity.deactivated  # Простая проверка для чатов
+                    except (UserNotParticipantError, ChannelPrivateError, ChatAdminRequiredError, Exception):
+                        is_member = False  # Если не удалось проверить, считаем, что аккаунт не участник
+
+                    if is_member:
+                        # Отписываемся от диалога (канала или чата)
+                        if isinstance(dialog.entity, types.Channel):
+                            await client(functions.channels.LeaveChannelRequest(channel=dialog.entity))
+                            log_msg = f"Сессия {session.filename} успешно отписалась от канала {dialog.entity.username or str(dialog.entity.id)}"
+                            rootLogger.info(log_msg)
+                            write_daily_log(log_msg)
+                        elif isinstance(dialog.entity, types.Chat):
+                            await client(functions.messages.DeleteChatUserRequest(
+                                chat_id=dialog.entity.id,
+                                user_id=await client.get_input_entity(me)
+                            ))
+                            log_msg = f"Сессия {session.filename} успешно вышла из чата {dialog.entity.title or str(dialog.entity.id)}"
+                            rootLogger.info(log_msg)
+                            write_daily_log(log_msg)
+                    else:
+                        entity_name = dialog.entity.username or dialog.entity.title or str(dialog.entity.id)
+                        log_msg = f"Сессия {session.filename} уже не участвует в {entity_name}, пропускаем"
+                        rootLogger.info(log_msg)
+                        write_daily_log(log_msg)
+                except Exception as e:
+                    entity_name = dialog.entity.username or dialog.entity.title or str(dialog.entity.id)
+                    log_msg = f"Ошибка при отписке от {entity_name} для сессии {session.filename}: {str(e)}"
+                    rootLogger.error(log_msg)
+                    write_daily_log(log_msg)
+                    await bot.send_message(chat_id, log_msg)
+                    continue
+    except Exception as e:
+        log_msg = f"Критическая ошибка при отписке всех каналов и чатов для сессии {session.filename}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+
+    # Не изменяем channels или channels_subscribed, но логируем их состояние
+    log_msg = f"Состояние после отписки для компании {session.company}: channels={channels.get(session.company, [])}, subscribed={channels_subscribed.get(session.company, [])}"
+    rootLogger.debug(log_msg)
+    write_daily_log(log_msg)
+
+def convert_entities_to_html(text: str, entities: list) -> str:
+    """
+    Преобразует текст с Telegram entities в HTML-форматированный текст.
+    
+    Args:
+        text (str): Исходный текст сообщения.
+        entities (list): Список Telegram entities (например, message.entities).
+    
+    Returns:
+        str: Текст с HTML-тегами для форматирования.
+    """
+    if not entities:
+        return text
+
+    # Создаём список изменений (оффсеты и теги)
+    changes = []
+    for entity in entities:
+        start = entity.offset
+        end = start + entity.length
+        if isinstance(entity, types.MessageEntityBold):
+            changes.append((start, "<b>"))
+            changes.append((end, "</b>"))
+        elif isinstance(entity, types.MessageEntityItalic):
+            changes.append((start, "<i>"))
+            changes.append((end, "</i>"))
+        elif isinstance(entity, types.MessageEntityCode):
+            changes.append((start, "<code>"))
+            changes.append((end, "</code>"))
+        elif isinstance(entity, types.MessageEntityPre):
+            changes.append((start, "<pre>"))
+            changes.append((end, "</pre>"))
+        elif isinstance(entity, types.MessageEntityTextUrl):
+            changes.append((start, f'<a href="{entity.url}">'))
+            changes.append((end, "</a>"))
+        elif isinstance(entity, types.MessageEntityUrl):
+            url = text[start:end]
+            changes.append((start, f'<a href="{url}">'))
+            changes.append((end, "</a>"))
+        # Добавь другие типы entities, если нужно (например, для подчёркивания, зачёркивания и т.д.)
+
+    # Сортируем изменения по оффсету, начиная с конца
+    changes.sort(key=lambda x: x[0], reverse=True)
+
+    # Применяем изменения к тексту
+    result = text
+    for offset, tag in changes:
+        result = result[:offset] + tag + result[offset:]
+
+    return result
+
+async def getpost(event: events.NewMessage.Event):
+    global commenting_paused
+    if commenting_paused:
+        return
+
+    me = await event.client.get_me()
+    session = next((s for s in sessions if s.me and s.me.id == me.id), None)
+    if not session:
+        log_msg = f"Сессия для клиента с ID {me.id} не найдена в getpost"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    await handle_spam_block(event.client)
+    if session.blocked or (session.unblocked_at and session.unblocked_at > datetime.utcnow()) or \
+       session.limit >= 50 or (session.flood_wait_until and session.flood_wait_until > datetime.utcnow()):
+        return
+
+    message = event.message
+    try:
+        chat = await event.client.get_entity(message.chat_id)
+    except Exception as e:
+        log_msg = f"Не удалось получить данные чата {message.chat_id}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    if not isinstance(chat, types.Channel) or chat.megagroup:
+        return
+
+    post_text = message.text or message.message or ""
+    if not post_text or len(post_text.encode('utf-8')) < MIN_POST_LIMIT:
+        return
+
+    post_url = f"https://t.me/{chat.username or chat.id}/{message.id}"
+    if post_url in session.commented_posts:
+        log_msg = f"Пост {post_url} уже прокомментирован сессией {session.filename}, пропускаем"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    try:
+        full_channel = await event.client(functions.channels.GetFullChannelRequest(channel=chat))
+        if not full_channel.full_chat.linked_chat_id:
+            return
+    except Exception as e:
+        log_msg = f"Не удалось получить информацию о канале {chat.id}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    try:
+        target_chat = await event.client.get_entity(full_channel.full_chat.linked_chat_id)
+    except ChannelPrivateError as e:
+        log_msg = f"Чат обсуждения {full_channel.full_chat.linked_chat_id} приватный или доступ запрещён для {session.filename}, пропускаем и отписываемся: {str(e)}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+
+        # Выполняем отписку от чата
+        await leave_channel(event.client, full_channel.full_chat.linked_chat_id)
+
+        # Проверка спам-блока через @spambot
+        try:
+            await event.client.send_message("@spambot", "/start")
+            await asyncio.sleep(1)  # Даём время на ответ
+            async for msg in event.client.iter_messages("@spambot", limit=1):
+                response_text = msg.text.lower() if msg and msg.text else ""
+                if "your account was blocked" in response_text or "ваш аккаунт был заблокирован" in response_text:
+                    log_msg = f"Сессия {session.filename} заморожена после бана в {full_channel.full_chat.linked_chat_id}, перемещаем"
+                    rootLogger.error(log_msg)
+                    write_daily_log(log_msg)
+                    await move_to_banned(f"./companies/{session.company}/sessions/{session.filename}")
+                elif "your account is now limited" in response_text or "ваш аккаунт сейчас ограничен" in response_text:
+                    log_msg = f"Сессия {session.filename} ограничена после бана в {full_channel.full_chat.linked_chat_id}, перемещаем"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    await move_to_banned(f"./companies/{session.company}/sessions/{session.filename}")
+        except Exception as e:
+            log_msg = f"Ошибка при проверке спам-блока для {session.filename} после бана в {full_channel.full_chat.linked_chat_id}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+
+        return
+    except Exception as e:
+        log_msg = f"Не удалось получить чат обсуждения {full_channel.full_chat.linked_chat_id}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    discussion_message_id = None
+    await asyncio.sleep(5)
+    async for msg in event.client.iter_messages(target_chat, limit=50):
+        msg_text = msg.text or ""
+        if post_text.strip() == msg_text.strip():
+            discussion_message_id = msg.id
+            break
+
+    if not discussion_message_id:
+        log_msg = f"Не найдено сообщение в чате обсуждения с текстом поста {message.id} из канала {chat.id}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    await asyncio.sleep(POST_SLEEP_TIME_SECOND)
+
+    if company_configs[session.company].get("filter") and not any(filt in post_text for filt in company_configs[session.company]["filter"]):
+        return
+
+    try:
+        prompt = prompts.get(session.company, {}).get(session.me.id, default_prompt)
+        text = await GetText(post_text, prompt)
+        if not text or not text.strip():
+            return
+        text = text.replace('"', '')
+    except Exception as e:
+        log_msg = f"Не удалось сгенерировать комментарий для {session.filename}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+        return
+
+    # Отправка комментария с проверкой на "has no username"
+    success = await send_message(event.client, message, text, target_chat, True, me, discussion_message_id)
+    if success:
+        session.commented_posts.append(post_url)
+        session.save_commented_posts()
+        log_msg = f"Аккаунт {session.filename} (компания {session.company}) отправил комментарий на пост {post_url}! Текст: '{text}'"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+    else:
+        if session.blocked:
+            log_msg = f"Запуск глобальной проверки спам-блока для всех сессий из-за бана {session.filename}"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            active_sessions = [s for s in sessions if s.me is not None]
+            total_count = len(active_sessions)
+            blocked_sessions = []
+            for s in active_sessions:
+                if s != session:
+                    is_blocked = not await check_spam_block_on_startup(s)
+                    if is_blocked:
+                        blocked_sessions.append(s.filename)
+            commenting_paused = False
+            live_count = total_count - len(blocked_sessions)
+            await send_spam_block_report(owner_id, chat_id, event.message, live_count, total_count, blocked_sessions)
+
+async def check_session_status(session: Session) -> tuple[str, str | None]:
+    if not session.app or not session.me:
+        log_msg = f"Сессия {session.filename} неактивна или не авторизована"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return "красный", "banned"
+
+    try:
+        spambot_response = await session.app.send_message("@spambot", "/start")
+        await asyncio.sleep(1)
+        async for msg in session.app.iter_messages("@spambot", limit=1):
+            response_text = msg.text.lower() if msg and msg.text else ""
+            log_msg = f"Ответ @spambot для {session.filename}: {response_text}"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+
+        log_msg = (f"Проверка условий для {session.filename}: blocked={session.blocked}, "
+                   f"unblocked_at={session.unblocked_at}, flood_wait_until={session.flood_wait_until}, "
+                   f"limit={session.limit}, rest_until={session.rest_until}")
+        rootLogger.debug(log_msg)
+        write_daily_log(log_msg)
+
+        if "your account was blocked for violations" in response_text or "ваш аккаунт был заблокирован за нарушения" in response_text:
+            log_msg = f"Сессия {session.filename} заморожена по правилам Telegram"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            return "красный", "frozen"
+        elif ("your account is now limited" in response_text or "your account is limited until" in response_text or
+              "ваш аккаунт сейчас ограничен" in response_text or "ваш аккаунт ограничен до" in response_text):
+            log_msg = f"Сессия {session.filename} ограничена (спам-блок) по правилам Telegram"
+            rootLogger.warning(log_msg)
+            write_daily_log(log_msg)
+            return "жёлтый", "spamblocked"
+        elif ("no limits are currently applied" in response_text or "ваш аккаунт свободен от каких-либо ограничений" in response_text):
+            log_msg = f"Сессия {session.filename} свободна по @spambot"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            return "зелёный", None
+        else:
+            log_msg = f"Сессия {session.filename} получила нераспознанный ответ от @spambot: {response_text}"
+            rootLogger.warning(log_msg)
+            write_daily_log(log_msg)
+            return "жёлтый", "unknown"
+
+    except (FloodWaitError, ValueError) as e:
+        log_msg = f"Ошибка при проверке сессии {session.filename} через @spambot: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return "жёлтый", None
+    except Exception as e:
+        log_msg = f"Критическая ошибка при проверке сессии {session.filename}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return "красный", "banned"
+
+async def move_session(session_path: str, target_folder: str, session: Session = None):
+    if not os.path.exists(target_folder):
+        os.makedirs(target_folder)
+        log_msg = f"Создано {target_folder} для хранения сессий"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+    new_path = os.path.join(target_folder, os.path.basename(session_path))
+    # Отключение сессии, если она активна
+    if session and session.app and session.app.is_connected():
+        try:
+            await session.app.disconnect()
+            log_msg = f"Сессия {os.path.basename(session_path)} успешно отключена перед перемещением"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+        except Exception as e:
+            log_msg = f"Ошибка при отключении сессии {os.path.basename(session_path)}: {str(e)}"
+            rootLogger.warning(log_msg)
+            write_daily_log(log_msg)
+    if os.path.exists(session_path):
+        shutil.move(session_path, new_path)
+        log_msg = f"Сессия {os.path.basename(session_path)} перемещена в {target_folder}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+    # Перенос связанного JSON-файла с тем же именем
+    json_path = session_path.replace(".session", ".json")
+    if os.path.exists(json_path):
+        new_json_path = new_path.replace(".session", ".json")
+        shutil.move(json_path, new_json_path)
+        log_msg = f"JSON-файл {os.path.basename(json_path)} перемещён в {target_folder}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+
+async def shuffle_channels(callback: atypes.CallbackQuery):
+    global channels, selected_company
+    if not selected_company:
+        await callback.message.edit_text("Сначала выберите компанию.")
+        return
+
+    if selected_company not in channels or not channels[selected_company]:
+        await callback.message.edit_text("Нет активных каналов для перемешивания в этой компании.")
+        return
+
+    # Перемешиваем список каналов
+    random.shuffle(channels[selected_company])
+    with open(f"./companies/{selected_company}/channels.txt", "w", encoding='utf-8') as file:
+        file.write("\n".join(channels[selected_company]))
+    
+    log_msg = f"Каналы для компании {selected_company} перемешаны: {', '.join(channels[selected_company][:5]) + '...' if len(channels[selected_company]) > 5 else ', '.join(channels[selected_company])}"
+    rootLogger.info(log_msg)
+    write_daily_log(log_msg)
+    await bot.send_message(chat_id, log_msg)
+    await callback.message.edit_text("Каналы успешно перемешаны!")
+    await callback.answer()
+
+# Обработчик для кнопки "Перемешать каналы"
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "shuffle_channels"))
+async def handle_shuffle_channels(callback: atypes.CallbackQuery):
+    await shuffle_channels(callback) 
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "add_channels_text"))
+async def start_add_channels_text(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(AddChannelState.add)  # Используем существующее состояние для добавления каналов
+    await callback.message.edit_text("Отправьте .txt файл с каналами для добавления (каждый канал с новой строки, формат: @username или https://t.me/username).", reply_markup=None)
+    await callback.answer()
+
+# Обработчик для кнопки отписки остается без изменений
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "unsubscribe_all"))
+async def handle_unsubscribe_all(callback: atypes.CallbackQuery):
+    global sessions, selected_company
+    ses = list(filter(lambda x: x.me != None and x.company == selected_company, sessions))
+    if not ses:
+        await callback.message.edit_text("Нет активных сессий для отписки. Добавьте сессии или выберите другую компанию.")
+        return
+
+    tasks = [asyncio.create_task(unsubscribe_all_channels(session.app)) for session in ses]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    errors = [f"Сессия {s.filename}: {str(e)}" for s, e in zip(ses, results) if isinstance(e, Exception)]
+    if errors:
+        await callback.message.edit_text(f"Отписка завершена с ошибками:\n{'\n'.join(errors)}")
+    else:
+        await callback.message.edit_text("Все аккаунты успешно отписались от всех каналов!")
+    await callback.answer()
+
+async def main():
+    company_files = listdir("./companies")
+    for company_path in company_files:
+        session_files = [f for f in listdir(f"./companies/{company_path}/sessions") if f.endswith('.session')]
+        for session_file_path in session_files:
+            full_path = f"./companies/{company_path}/sessions/{session_file_path}"
+            client = make_client(full_path)
+            session = Session(client, session_file_path, company_path)
+            sessions.append(session)
+            log_msg = f"Сессия {session_file_path} добавлена в sessions"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+
+    tasks = [asyncio.create_task(s.app.start(phone=f"+{s.filename[:-8]}")) for s in sessions]
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        inactive_sessions = []
+        for session, result in zip(sessions[:], results):
+            if isinstance(result, Exception):
+                log_msg = f"Ошибка при запуске сессии {session.filename}: {str(result)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                if "The used phone number has been banned" in str(result):
+                    session_path = f"./companies/{session.company}/sessions/{session.filename}"
+                    await move_to_banned(session_path)
+                    sessions.remove(session)
+                    log_msg = f"Сессия {session.filename} заблокирована Telegram и удалена из sessions"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                    await bot.send_message(chat_id, log_msg)
+                    continue
+                inactive_sessions.append(session)
+            else:
+                me = await session.app.get_me()
+                if me:
+                    session.id = me.id
+                    session.me = me
+                    if not session.app.is_connected():
+                        log_msg = f"Клиент для сессии {session.filename} не подключён после старта, пытаемся переподключить"
+                        rootLogger.warning(log_msg)
+                        write_daily_log(log_msg)
+                        await session.app.connect()
+                    log_msg = f"Сессия {session.filename} активирована с ID {me.id}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                else:
+                    inactive_sessions.append(session)
+
+        if not os.path.exists("./banned_sessions"):
+            os.makedirs("./banned_sessions")
+        for session in inactive_sessions:
+            session_path = f"./companies/{session.company}/sessions/{session.filename}"
+            await move_to_banned(session_path)
+            sessions.remove(session)
+            log_msg = f"Сессия {session.filename} неактивна и удалена из sessions"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+
+        log_msg = "Запуск проверки всех сессий на спам-блок"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        active_sessions = [s for s in sessions if s.me is not None]
+        for session in active_sessions:
+            await check_spam_block_on_startup(session)
+            if session.flood_wait_until and session.flood_wait_until > datetime.now(UTC):
+                wait_seconds = (session.flood_wait_until - datetime.now(UTC)).total_seconds()
+                log_msg = f"Сессия {session.filename} ждёт окончания FloodWait: {int(wait_seconds)} секунд"
+                rootLogger.warning(log_msg)
+                write_daily_log(log_msg)
+                await asyncio.sleep(wait_seconds)
+            await asyncio.sleep(2)
+
+        log_msg = f"Проверка завершена. Активных сессий осталось: {len(active_sessions)}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+
+        log_msg = "Запуск параллельных задач подписки для всех компаний с задержкой"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        company_tasks = []
+        for i, company in enumerate(channels.keys()):
+            # Добавляем задержку 1-2 секунды между запуском задач
+            await asyncio.sleep(1 + random.random())  # Случайная задержка от 1 до 2 секунд
+            task = asyncio.create_task(worker(company))
+            company_tasks.append(task)
+            log_msg = f"Запущен worker для компании {company} с задержкой {i+1} сек"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+
+        asyncio.create_task(dp.start_polling(bot, handle_as_tasks=False, handle_signals=False))
+
+        while True:
+            try:
+                await asyncio.sleep(600)
+            except asyncio.CancelledError:
+                for task in company_tasks:
+                    task.cancel()
+                await asyncio.gather(*company_tasks, return_exceptions=True)
+                break
+
+    except Exception as e:
+        log_msg = f"Критическая ошибка в main: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+
+async def leave_channel(client: TelegramClient, chat_id: int):
+    session = next((s for s in sessions if s.app == client), None)
+    if not session:
+        log_msg = f"Сессия для клиента с ID {client} не найдена в leave_channel"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    try:
+        entity = await client.get_entity(PeerChannel(chat_id))
+        is_member = False
+        try:
+            participant = await client(functions.channels.GetParticipantRequest(
+                channel=entity,
+                participant=await client.get_input_entity(await client.get_me())
+            ))
+            is_member = participant.participant and not isinstance(participant.participant, types.ChannelParticipantBanned)
+        except (UserNotParticipantError, ChannelPrivateError, Exception):
+            is_member = False
+
+        if is_member:
+            await client(functions.channels.LeaveChannelRequest(channel=entity))
+            log_msg = f"Сессия {session.filename} успешно отписалась от чата {chat_id}"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+        else:
+            log_msg = f"Сессия {session.filename} не является участником чата {chat_id}, отписка не требуется"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+    except Exception as e:
+        log_msg = f"Ошибка при отписке от чата {chat_id} для {session.filename}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+
+async def check_spam_block_on_startup(session: Session):
+    global rootLogger, sessions
+
+    if not session.app or not session.me:
+        log_msg = f"Сессия {session.filename} неактивна или не авторизована, перемещаем в spamblocked"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await move_to_spamblocked(session)
+        return False
+
+    # Смена языка на английский
+    try:
+        await session.app(functions.account.SetAccountTTLRequest(
+            ttl=types.AccountDaysTTL(days=365)  # Это не влияет на язык, просто пример
+        ))
+        await session.app(functions.account.UpdateDeviceLockedRequest(period=0))  # Сброс настроек
+        await session.app(functions.account.SetPrivacyRequest(
+            key=types.InputPrivacyKeyLanguage(),
+            rules=[types.PrivacyValueAllowAll()]  # Разрешаем все
+        ))
+        log_msg = f"Для сессии {session.filename} установлен язык на английский"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+
+        # Установка языка через настройки (если поддерживается)
+        await session.app.send_message("Settings", "/lang en")
+        log_msg = f"Отправлена команда смены языка на английский для {session.filename}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+    except Exception as e:
+        log_msg = f"Ошибка при смене языка для {session.filename}: {str(e)}"
+        rootLogger.warning(log_msg)
+        write_daily_log(log_msg)
+
+    status, move_to = await check_session_status(session)
+    if status in ["жёлтый", "красный"]:
+        log_msg = f"Сессия {session.filename} имеет статус {status} ({move_to}), перемещаем в spamblocked"
+        rootLogger.warning(log_msg)
+        write_daily_log(log_msg)
+        await move_to_spamblocked(session)
+        return False
+    else:
+        log_msg = f"Сессия {session.filename} свободна (статус: {status}), продолжит работу"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        return True
+
+async def move_to_spamblocked(session):
+    session_path = f"./companies/{session.company}/sessions/{session.filename}"
+    target_folder = "./spamblocked_sessions"
+    await move_session(session_path, target_folder, session)
+    sessions.remove(session)
+
+async def move_to_banned(session_path: str):
+    filename = os.path.basename(session_path)
+    company = os.path.basename(os.path.dirname(os.path.dirname(session_path)))
+    banned_path = os.path.join("./banned_sessions", filename)
+    max_attempts = 5  # Максимальное количество попыток
+    attempt = 0
+
+    # Находим сессию по пути файла
+    global sessions
+    session = next((s for s in sessions if f"./companies/{s.company}/sessions/{s.filename}" == session_path), None)
+    if session:
+        log_msg = f"Найдена сессия {filename} для отключения перед перемещением"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        try:
+            # Останавливаем клиента, чтобы освободить файл
+            if session.app and session.app.is_connected():
+                await session.app.disconnect()
+                log_msg = f"Сессия {filename} успешно отключена для освобождения файла"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            else:
+                log_msg = f"Сессия {filename} уже отключена или не активна"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+        except Exception as e:
+            log_msg = f"Ошибка при отключении сессии {filename}: {str(e)}"
+            rootLogger.warning(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+    else:
+        log_msg = f"Сессия для файла {filename} не найдена, пытаемся переместить без отключения"
+        rootLogger.warning(log_msg)
+        write_daily_log(log_msg)
+
+    while attempt < max_attempts:
+        try:
+            # Проверяем, существует ли исходный файл
+            if not os.path.exists(session_path):
+                log_msg = f"Ошибка: Файл сессии {filename} не найден по пути {session_path}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+                return
+
+            # Проверяем, не занят ли файл другим процессом
+            try:
+                # Пытаемся открыть файл для проверки блокировки
+                with open(session_path, 'r') as test_file:
+                    pass  # Если файл открыт успешно, он не заблокирован
+            except PermissionError as e:
+                if "[WinError 32]" in str(e):
+                    log_msg = f"Файл {filename} всё ещё занят другим процессом. Попытка {attempt + 1}/{max_attempts}. Ожидание 2 секунды..."
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    attempt += 1
+                    if attempt < max_attempts:
+                        await asyncio.sleep(2)  # Задержка перед следующей попыткой
+                        continue
+                    else:
+                        log_msg = f"Не удалось переместить сессию {filename} после {max_attempts} попыток из-за блокировки файла"
+                        rootLogger.error(log_msg)
+                        write_daily_log(log_msg)
+                        await bot.send_message(chat_id, log_msg)
+                        return
+                else:
+                    raise  # Передаем другую ошибку PermissionError дальше
+
+            # Создаем папку banned_sessions, если она не существует
+            if not os.path.exists("./banned_sessions"):
+                os.makedirs("./banned_sessions")
+                log_msg = f"Создана папка ./banned_sessions для сессии {filename}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+
+            # Перемещаем файл
+            shutil.move(session_path, banned_path)
+            log_msg = f"Сессия {filename} успешно перемещена в ./banned_sessions"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            return
+
+        except PermissionError as e:
+            log_msg = f"Ошибка доступа при перемещении сессии {filename} (попытка {attempt + 1}/{max_attempts}): {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            attempt += 1
+            if attempt < max_attempts:
+                await asyncio.sleep(2)  # Задержка перед следующей попыткой
+                continue
+            else:
+                log_msg = f"Не удалось переместить сессию {filename} после {max_attempts} попыток"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+                return
+
+        except OSError as e:
+            log_msg = f"Системная ошибка при перемещении сессии {filename} (попытка {attempt + 1}/{max_attempts}): {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            attempt += 1
+            if attempt < max_attempts:
+                await asyncio.sleep(2)  # Задержка перед следующей попыткой
+                continue
+            else:
+                log_msg = f"Не удалось переместить сессию {filename} после {max_attempts} попыток из-за системной ошибки"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+                return
+
+        except Exception as e:
+            log_msg = f"Неизвестная ошибка при перемещении сессии {filename} (попытка {attempt + 1}/{max_attempts}): {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            attempt += 1
+            if attempt < max_attempts:
+                await asyncio.sleep(2)  # Задержка перед следующей попыткой
+                continue
+            else:
+                log_msg = f"Не удалось переместить сессию {filename} после {max_attempts} попыток из-за неизвестной ошибки"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+                return
+
+async def create_channel_for_accounts(data, message, state):
+    global selected_company, created_channels, channels_subscribed
+    await state.clear()
+    
+    # Получаем данные из состояния
+    channel_name = data.get('name', '')
+    avatar_bytes = data.get('avatar', None)
+    posts = data.get('posts', [])
+    select_ids = data.get('select', [])
+    
+    if not channel_name or not posts:
+        await message.reply("Ошибка: Не все данные для создания канала предоставлены.")
+        await start(message)
+        return
+    
+    # Находим сессии по выбранным ID
+    ses = [s for s in sessions if s.me and s.me.id in select_ids and s.company == selected_company]
+    if not ses:
+        await message.reply("Нет подходящих аккаунтов для создания канала.")
+        await start(message)
+        return
+    
+    processed = 0
+    total = len(ses)
+    status_msg = await message.reply(f"Создание каналов... Обработано 0 из {total}")
+    
+    for session in ses:
+        try:
+            # Создание приватного broadcast-канала
+            result = await session.app(CreateChannelRequest(
+                title=channel_name,
+                about="",  # Можно добавить описание, если нужно
+                megagroup=False,  # Не supergroup, для broadcast
+                broadcast=True,   # Broadcast-канал
+                # Приватный по умолчанию, если не указан username
+            ))
+            channel = result.chats[0]
+            channel_id = channel.id
+            channel_username = channel.username or f"channel_{channel_id}"  # Fallback для приватного
+            
+            # Retry-логика для UpdatePersonalChannelRequest (только если не broadcast или нужно)
+            max_retries = 3
+            retry_count = 0
+            personal_success = False
+            if not channel.broadcast:  # Проверяем тип канала
+                while retry_count < max_retries and not personal_success:
+                    try:
+                        await session.app(UpdatePersonalChannelRequest(channel=channel))
+                        personal_success = True
+                        log_msg = f"Успешно применён UpdatePersonalChannelRequest для {session.filename} (попытка {retry_count + 1})"
+                        rootLogger.info(log_msg)
+                        write_daily_log(log_msg)
+                    except Exception as retry_e:
+                        if "RPCError 400: PUBLIC_BROADCAST_EXPECTED" in str(retry_e):
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                delay = random.uniform(5, 10)
+                                log_msg = f"Ошибка PUBLIC_BROADCAST_EXPECTED для {session.filename} (попытка {retry_count}/{max_retries}). Retry через {delay:.1f} сек."
+                                rootLogger.warning(log_msg)
+                                write_daily_log(log_msg)
+                                await asyncio.sleep(delay)
+                            else:
+                                log_msg = f"Все {max_retries} попыток исчерпаны для {session.filename}. Пропускаем UpdatePersonalChannelRequest."
+                                rootLogger.error(log_msg)
+                                write_daily_log(log_msg)
+                                personal_success = True  # Продолжаем без update
+                        else:
+                            raise retry_e
+                if not personal_success:
+                    raise Exception("Не удалось применить personal settings после retries")
+            else:
+                log_msg = f"Канал для {session.filename} — broadcast, пропускаем UpdatePersonalChannelRequest."
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            
+            # Установка аватара, если предоставлен
+            if avatar_bytes:
+                try:
+                    await session.app(functions.channels.EditPhotoRequest(
+                        channel=channel,
+                        photo=await session.app.upload_file(avatar_bytes),
+                        for_private=False  # Для канала
+                    ))
+                    log_msg = f"Аватар установлен для канала {session.filename}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                except Exception as e:
+                    log_msg = f"Ошибка установки аватара для {session.filename}: {str(e)}"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+            
+            # Публикация постов
+            for post in posts:
+                try:
+                    if post['type'] == 'text':
+                        await session.app.send_message(channel, post['content'], parse_mode='html' if post.get('entities') else None)
+                    elif post['type'] == 'photo':
+                        await session.app.send_file(channel, post['file_id'], caption=post.get('caption', ''), parse_mode='html' if post.get('entities') else None)
+                    elif post['type'] == 'video':
+                        await session.app.send_file(channel, post['file_id'], video=True, caption=post.get('caption', ''), parse_mode='html' if post.get('entities') else None)
+                    elif post['type'] == 'album':
+                        # Для альбомов: отправляем как media group
+                        media = [session.app.send_file(channel, p['file_id'], caption=p.get('caption', '') if i == 0 else None) for i, p in enumerate(post['photos'])]
+                        await session.app.send_message(channel, file=media)  # Отправка как группа
+                    await asyncio.sleep(2)  # Задержка между постами
+                    log_msg = f"Пост типа {post['type']} опубликован в канале {session.filename}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                except Exception as e:
+                    log_msg = f"Ошибка публикации поста в {session.filename}: {str(e)}"
+                    rootLogger.error(log_msg)
+                    write_daily_log(log_msg)
+                    continue
+            
+            # Сохранение в created_channels
+            created_channels.setdefault(selected_company, []).append({
+                "id": channel_id,
+                "name": channel_name,
+                "username": channel_username
+            })
+            with open(f"./companies/{selected_company}/created_channels.json", "w", encoding="utf-8") as file:
+                json.dump(created_channels[selected_company], file, ensure_ascii=False)
+            
+            # Добавляем в subscribed, если нужно
+            normalized_username = f"@{channel_username}" if channel_username.startswith('@') else channel_username
+            channels_subscribed.setdefault(selected_company, []).append(normalized_username)
+            with open(f"./companies/{selected_company}/channels_sub.txt", "w", encoding="utf-8") as file:
+                file.write("\n".join(channels_subscribed[selected_company]))
+            
+            processed += 1
+            log_msg = f"Канал '{channel_name}' успешно создан для {session.filename} (ID: {channel_id})"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            
+            # Обновляем статус
+            await status_msg.edit_text(f"Создание каналов... Обработано {processed} из {total}")
+            
+        except Exception as e:
+            log_msg = f"Общая ошибка создания канала для {session.filename}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            continue
+    
+    # Финальный лог и сообщение
+    log_msg = f"Создание/обновление каналов завершено: обработано {processed} из {total} аккаунтов."
+    rootLogger.info(log_msg)
+    write_daily_log(log_msg)
+    await status_msg.edit_text(log_msg)
+    await start(message)
+
+async def apply_data(callback: atypes.CallbackQuery, state: FSMContext, change: str = ""):
+    data = await state.get_data()
+    select = data.get("select", [])
+    change = data.get("change", change)
+    value = data.get("value", None) if change != "delete_avatar" else None
+    ses = [s for s in sessions if s.me and int(s.me.id) in select]
+    if not ses:
+        await callback.message.edit_text("Нет выбранных аккаунтов для применения изменений.")
+        await state.clear()
+        await start(callback.message)
+        return
+    rootLogger.info(f"Применение действия '{change}' для {len(ses)} сессий")
+
+    async def apply_to_session(session):
+        try:
+            if change == "fname":
+                me = await session.app.get_me()
+                current_last_name = me.last_name if me.last_name else ""
+                await session.app(functions.account.UpdateProfileRequest(
+                    first_name=value,
+                    last_name=current_last_name
+                ))
+                log_msg = f"Имя изменено для сессии {session.filename}: {value}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            elif change == "lname":
+                me = await session.app.get_me()
+                current_first_name = me.first_name if me.first_name else ""
+                await session.app(functions.account.UpdateProfileRequest(
+                    first_name=current_first_name,
+                    last_name=value
+                ))
+                log_msg = f"Фамилия изменена для сессии {session.filename}: {value}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            elif change == "bio":
+                await session.app(functions.account.UpdateProfileRequest(
+                    first_name=session.me.first_name if session.me.first_name else "",
+                    last_name=session.me.last_name if session.me.last_name else "",
+                    about=value
+                ))
+                log_msg = f"Био изменено для сессии {session.filename}: {value}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            elif change == "avatar":
+                if isinstance(value, bytes):
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+                        temp_file.write(value)
+                        temp_file_path = temp_file.name
+                    try:
+                        photo = await session.app.upload_file(temp_file_path)
+                        await session.app(functions.photos.UploadProfilePhotoRequest(file=photo))
+                        log_msg = f"Аватар обновлён для сессии {session.filename}"
+                        rootLogger.info(log_msg)
+                        write_daily_log(log_msg)
+                    finally:
+                        os.remove(temp_file_path)
+                else:
+                    raise ValueError("Неверный формат аватара")
+            elif change == "delete_avatar":
+                photos = await session.app(functions.photos.GetUserPhotosRequest(
+                    user_id=await session.app.get_input_entity(session.me.id),
+                    offset=0,
+                    max_id=0,
+                    limit=100
+                ))
+                if isinstance(photos, types.photos.Photos) and photos.photos:
+                    photo_ids = [types.InputPhoto(
+                        id=photo.id,
+                        access_hash=photo.access_hash,
+                        file_reference=photo.file_reference
+                    ) for photo in photos.photos]
+                    await session.app(functions.photos.DeletePhotosRequest(id=photo_ids))
+                    log_msg = f"Все фото удалены для сессии {session.filename}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                else:
+                    log_msg = f"Нет фото для удаления в профиле сессии {session.filename}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+            elif change == "prompts":
+                prompts[selected_company][session.me.id] = value
+                log_msg = f"Промпт изменён для сессии {session.filename}: {value}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+        except Exception as e:
+            raise e
+
+    tasks = [apply_to_session(session) for session in ses]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    successful_updates = 0
+    for session, result in zip(ses, results):
+        if isinstance(result, Exception):
+            log_msg = f"ОШИБКА: Не удалось применить изменения для {session.filename}: {str(result)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+        else:
+            successful_updates += 1
+
+    if change == "prompts":
+        with open(f"./companies/{selected_company}/prompts.json", "w", encoding="utf-8") as file:
+            json.dump(prompts[selected_company], file, ensure_ascii=False)
+
+    report_text = f"Действия применены к {successful_updates} {'сессии' if successful_updates == 1 else 'сессиям'} из {len(ses)}"
+    max_attempts = 1
+    attempt = 0
+    while attempt < max_attempts:
+        try:
+            current_message = await bot.get_messages(callback.message.chat.id, callback.message.message_id)
+            if current_message.text != report_text:
+                await callback.message.edit_text(report_text)
+            break
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                break
+            attempt += 1
+            if attempt < max_attempts:
+                await asyncio.sleep(3)
+            else:
+                log_msg = f"Не удалось отправить отчёт: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+    await callback.answer()
+    await state.clear()
+    await start(callback.message)
+
+async def on_ban_notify(event):
+    client = event._client
+    try:
+        me = await client.get_me()
+        session = next((s for s in sessions if s.me and s.me.id == me.id), None)
+        if not session:
+            return
+
+        # Обработка новых сообщений
+        if isinstance(event, (types.UpdateNewMessage, types.UpdateNewChannelMessage)):
+            message = event.message
+            if hasattr(message, 'peer_id') and isinstance(message.peer_id, types.PeerChannel):
+                event_msg = events.NewMessage.Event(message=message)
+                event_msg._client = client
+                await getpost(event_msg)
+            return
+
+        # Обработка банов
+        if isinstance(event, types.UpdateChannelParticipant):
+            chat_id = event.channel_id
+            user_id = event.user_id
+            if user_id == me.id and isinstance(event.new_participant, types.ChannelParticipantBanned):
+                chat = await client.get_entity(types.PeerChannel(chat_id))
+                log_msg = f"Сессия {session.filename} забанена в канале {chat.username or chat_id}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+                await client(functions.channels.LeaveChannelRequest(chat))
+                if chat.username and chat.username in channels[session.company]:
+                    channels[session.company].remove(chat.username)
+                if chat.username and chat.username in channels_subscribed[session.company]:
+                    channels_subscribed[session.company].remove(chat.username)
+                with open(f"./companies/{session.company}/channels_sub.txt", "w", encoding='utf-8') as file:
+                    file.write("\n".join(channels_subscribed[session.company]))
+                if channels[session.company]:
+                    new_channel = random.choice(channels[session.company])
+                    await join_channel(client, new_channel)
+
+    except Exception as e:
+        log_msg = f"Ошибка в on_ban_notify для клиента {client.session}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+        
+async def check_appelation():
+    for session in sessions:
+        session.limit = 0
+        if session.app is None:
+            continue
+        await handle_spam_block(session.app)
+        if session.sent_appelation and session.blocked:
+            await session.app.send_message(178220800, "/start")
+            await handle_spam_block(session.app)
+
+async def auto_unsubscribe_channels():
+    global sessions
+    current_time = datetime.utcnow()
+    for session in sessions:
+        if session.app is None or session.me is None:
+            continue
+        if session.join_limit_exceeded_at and (current_time - session.join_limit_exceeded_at).total_seconds() >= 48 * 3600:  # 48 часов
+            await unsubscribe_all_channels(session.app)
+            session.join_limit_exceeded_at = None  # Сбрасываем флаг после отписки
+            log_msg = f"Сессия {session.filename} автоматически отписана от всех каналов после 48 часов превышения лимита каналов"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+
+scheduler.add_job(check_appelation, "interval", hours=24)
+scheduler.add_job(auto_unsubscribe_channels, "interval", hours=1)
+
+def split_text(text, max_tokens=4096):
+    text_parts = []
+    current_text = ""
+    for sentence in text.split('\n'):
+        if len(current_text) + len(sentence) + 1 <= max_tokens:
+            current_text += sentence + '\n'
+        else:
+            text_parts.append(current_text)
+            current_text = sentence + '\n'
+    text_parts.append(current_text)
+    return text_parts
+
+async def GetText(input_text, prompt=None):
+    messages = [
+        SystemMessage(
+            content=prompt if prompt else default_prompt
+        ),
+        HumanMessage(
+            content=input_text
+        )
+    ]
+    res = giga_chat.invoke(messages)
+    text = res.content.strip()
+    if not text:
+        log_msg = f"Сгенерированный комментарий пустой для текста: {input_text[:50]}..."
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        return None
+
+    # Проверяем текст на наличие нежелательных слов
+    cleaned_text = text.lower()
+    if any(bad_word in cleaned_text for bad_word in bad_words):
+        log_msg = f"Сгенерированный комментарий заблокирован из-за нежелательного слова: '{text}'"
+        rootLogger.warning(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+        return None
+
+    # Проверяем, если GigaChat вернул blacklist (дополнительная защита)
+    if hasattr(res, 'metadata') and res.metadata.get('reason') == 'blacklist':
+        log_msg = f"Сгенерированный комментарий заблокирован GigaChat (blacklist): '{text}'"
+        rootLogger.warning(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+        return None
+
+    return text.replace('"', '')
+
+
+
+async def on_banned_user(event: events.ChatAction.Event):
+    client = event._client
+    me = await client.get_me()
+    session = next((s for s in sessions if s.me and s.me.id == me.id), None)
+    if not session:
+        log_msg = f"Сессия для клиента с ID {me.id} не найдена в on_banned_user"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    # Проверяем, есть ли текущий пользователь среди забаненных
+    if me.id in event.users and event.banned_rights:
+        chat = await event.get_chat()
+        chat_name = chat.username or chat.title or str(chat.id)
+        log_msg = f"Сессия {session.filename} забанена в чате {chat_name}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+
+        # Отписываемся от чата
+        try:
+            await client(functions.channels.LeaveChannelRequest(channel=chat))
+            log_msg = f"Сессия {session.filename} отписалась от чата {chat_name} после бана"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+        except Exception as e:
+            log_msg = f"Ошибка при отписке от чата {chat_name} для {session.filename}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+
+
+async def send_spam_block_report(owner_id, chat_id, message, live_count, total_count, blocked_sessions):
+    """Отправляет отчёт о спам-блоке админу в ЛС и детали в чат."""
+    # Сообщение админу в ЛС
+    admin_msg = f"Проверка завершена, живых аккаунтов: {live_count} из {total_count}"
+    try:
+        await bot.send_message(owner_id, admin_msg)
+        log_msg = f"Отчёт отправлен админу: {admin_msg}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+    except Exception as e:
+        log_msg = f"Ошибка отправки отчёта админу: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+
+    # Детали в общий чат
+    if blocked_sessions:
+        chat_msg = f"Спам-блок проверка:\nЖивых: {live_count}/{total_count}\nЗаблокировано: {', '.join(blocked_sessions)}"
+    else:
+        chat_msg = f"Спам-блок проверка: Живых: {live_count}/{total_count}, заблокированных нет"
+    try:
+        await bot.send_message(chat_id, chat_msg)
+        log_msg = f"Детали проверки отправлены в чат: {chat_msg}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+    except Exception as e:
+        log_msg = f"Ошибка отправки деталей в чат: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+
+
+async def send_message(client: TelegramClient, message, text: str, target_chat, quote: bool, me, discussion_message_id):
+    global commenting_paused
+    session = next((s for s in sessions if s.me and s.me.id == me.id), None)
+    if not session or text is None:
+        return False
+
+    cleaned_text = text.replace('"', '') if text else text
+    try:
+        await client.send_message(target_chat, cleaned_text, reply_to=discussion_message_id)
+        session.limit += 1
+        session.comments_today += 1
+        return True
+    except ForbiddenError as e:
+        if "You're banned from sending messages in supergroups/channels" in str(e):
+            log_msg = f"Сессия {session.filename} поймала спам-блок при отправке в {target_chat.id}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            session.blocked = True
+            commenting_paused = True
+            await notify_admin_and_check_spamblock(client, session)
+            return False
+        else:
+            log_msg = f"Аккаунт {session.filename} забанен в чате {target_chat.id}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            try:
+                await client(functions.channels.LeaveChannelRequest(target_chat))
+                channel_name = f"@{target_chat.username}" if target_chat.username else str(target_chat.id)
+                if channel_name in channels_subscribed.get(session.company, []):
+                    channels_subscribed[session.company].remove(channel_name)
+                    with open(f"./companies/{session.company}/channels_sub.txt", "w", encoding='utf-8') as file:
+                        file.write("\n".join(channels_subscribed[session.company]))
+                if channels.get(session.company):
+                    new_channel = random.choice(channels[session.company])
+                    await join_channel(client, new_channel)
+            except Exception as e:
+                log_msg = f"Ошибка при отписке от чата {target_chat.id}: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+            return False
+    except UsernameInvalidError as e:
+        log_msg = f"Ошибка отправки от {session.filename}: Юзернейм не найден ({str(e)})"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        status, move_to = await check_session_status(session)
+        if move_to or status == "жёлтый":  # Изменено: "жёлтый" тоже триггерит перемещение
+            await move_to_spamblocked(session)
+        await bot.send_message(chat_id, log_msg)
+        return False
+    except Exception as e:
+        log_msg = f"Ошибка при отправке комментария для {session.filename}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+        return False
+        
+async def leave_and_join_channel(client: TelegramClient, session: Session, target_chat, chat_id, bot):
+    try:
+        # Проверяем, является ли target_chat каналом или чатом
+        entity = await client.get_entity(target_chat)
+        is_channel = isinstance(entity, (types.Channel, types.ChannelForbidden))
+        channel_id = entity.id if is_channel else None
+
+        if not is_channel:
+            # Ищем связанный канал, если это чат
+            dialogs = await client.get_dialogs()
+            for dialog in dialogs:
+                if (isinstance(dialog.entity, types.Channel) and 
+                    dialog.entity.megagroup and 
+                    dialog.entity.linked_chat_id == entity.id):
+                    channel_id = dialog.entity.id
+                    entity = dialog.entity
+                    break
+
+        if channel_id:
+            # Проверяем членство
+            is_member = False
+            try:
+                participant = await client(functions.channels.GetParticipantRequest(
+                    channel=await client.get_input_entity(entity),
+                    participant=await client.get_input_entity(await client.get_me())
+                ))
+                is_member = participant.participant and not isinstance(participant.participant, types.ChannelParticipantBanned)
+            except (UserNotParticipantError, ChannelPrivateError, Exception):
+                is_member = False
+
+            if is_member:
+                await client(functions.channels.LeaveChannelRequest(channel=await client.get_input_entity(entity)))
+                channel_name = f"@{entity.username}" if entity.username else str(entity.id)
+                if channel_name in channels_subscribed.get(session.company, []):
+                    channels_subscribed[session.company].remove(channel_name)
+                    with open(f"./companies/{session.company}/channels_sub.txt", "w", encoding='utf-8') as file:
+                        file.write("\n".join(channels_subscribed[session.company]))
+                log_msg = f"Сессия {session.filename} успешно отписалась от канала {channel_id}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            else:
+                log_msg = f"Сессия {session.filename} не является участником канала {channel_id}, отписка не требуется"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+        else:
+            log_msg = f"Не удалось найти канал для отписки от {target_chat.id}"
+            rootLogger.warning(log_msg)
+            write_daily_log(log_msg)
+
+        # Подписка на новый канал
+        if channels.get(session.company):
+            new_channel = random.choice(channels[session.company])
+            await join_channel(client, new_channel)
+
+    except ForbiddenError as e:
+        if "You're banned from sending messages in supergroups/channels" in str(e):
+            log_msg = f"Сессия {session.filename} поймала спам-блок при отправке в {target_chat.id}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            session.blocked = True
+            commenting_paused = True
+            await notify_admin_and_check_spamblock(client, session)
+            return False
+        else:
+            log_msg = f"Ошибка прав доступа при отписке от {target_chat.id}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+    except Exception as e:
+        log_msg = f"Ошибка при отписке от чата {target_chat.id}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        # Избегаем отправки сообщения, если аккаунт может быть заблокирован
+        if not session.blocked:
+            try:
+                await bot.send_message(chat_id, log_msg)
+            except Exception:
+                log_msg = f"Не удалось отправить сообщение в чат {chat_id} для {session.filename}"
+                rootLogger.warning(log_msg)
+                write_daily_log(log_msg)
+
+async def reply_to_message(client: TelegramClient, message, text: str):
+    me = await client.get_me()  # Получаем me асинхронно
+    session: Session = list(filter(lambda x: x.me != None and x.me.id == me.id, sessions))[0]
+    try:
+        await client.send_message(message.chat.id, text, reply_to=message.id)
+        await bot.send_message(chat_id,
+                              f"Аккаунт {session.filename} (компания {session.company}) ответил на комментарий в группе {message.chat.title}!")
+        rootLogger.info(f"Отправлен комментарий: {text}")
+    except UserBannedInChannelError:
+        await client.send_message(178220800, "/start")
+        await handle_spam_block(client)
+    except ForbiddenError:
+        pass
+    except MessageIdInvalidError:
+        pass
+    except Exception as e:
+        rootLogger.error(f'Ошибка: {e}')
+
+async def handle_spam_block(client: TelegramClient):
+    me = await client.get_me()
+    filtered_sessions = list(filter(lambda x: x.me is not None and x.me.id == me.id, sessions))
+    if not filtered_sessions:
+        log_msg = f"Сессия для клиента с ID {me.id} не найдена в списке sessions"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+    
+    session: Session = filtered_sessions[0]
+    
+    # Добавляем атрибут для отслеживания последней проверки
+    if not hasattr(session, 'last_spam_check'):
+        session.last_spam_check = None
+    if not hasattr(session, 'spam_check_cooldown'):
+        session.spam_check_cooldown = 300  # 5 минут в секундах
+
+    current_time = datetime.now(UTC)
+    if session.last_spam_check and (current_time - session.last_spam_check).total_seconds() < session.spam_check_cooldown:
+        log_msg = f"Сессия {session.filename} недавно проверялась на спам-блок ({session.last_spam_check}), пропускаем"
+        rootLogger.debug(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            messages = await client.get_messages("@spambot", limit=2)
+            session.last_spam_check = current_time  # Обновляем время проверки
+            for message in messages:
+                block_info = re.search(r"Ограничения будут автоматически сняты (.+? UTC)", message.text)
+                if block_info:
+                    block_time_str = block_info.group(1)
+                    session.unblocked_at = datetime.strptime(block_time_str, "%d %b %Y, %H:%M %Z")
+                    log_msg = f"Сессия {session.filename} заблокирована до {session.unblocked_at}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                    break
+                if "Теперь Ваш аккаунт ограничен" in message.text or "К сожалению, иногда наша антиспам-система" in message.text:
+                    session.blocked = True
+                    log_msg = f"Сессия {session.filename} перешла в состояние: заблокирована"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                if "Спасибо! Ваша заявка отправлена." in message.text:
+                    session.sent_appelation = True
+                    log_msg = f"Сессия {session.filename} перешла в состояние: апелляция отправлена"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                if "Ваш аккаунт свободен" in message.text:
+                    session.blocked = False
+                    session.unblocked_at = None
+                    session.sent_appelation = False
+                    log_msg = f"Сессия {session.filename} перешла в состояние: свободна"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+            return  # Успешно проверили, выходим
+
+        except Exception as e:
+            if "Request was unsuccessful" in str(e):
+                if attempt < max_attempts - 1:
+                    log_msg = f"Попытка {attempt + 1}/{max_attempts} в handle_spam_block для {session.filename}: {str(e)}, ждём 5 секунд"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    await asyncio.sleep(5)  # Задержка перед повторной попыткой
+                    continue
+                else:
+                    log_msg = f"Сессия {session.filename} не смогла проверить спам-блок после {max_attempts} попыток: {str(e)}, временно пропускаем"
+                    rootLogger.error(log_msg)
+                    write_daily_log(log_msg)
+                    session.last_spam_check = current_time  # Всё равно обновляем, чтобы не спамить
+                    return
+            else:
+                log_msg = f"Ошибка в handle_spam_block для сессии {session.filename}: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                return
+
+async def on_spambot_message(event):
+    client = event.client
+    message = event.message
+    await handle_spam_block(client)
+    me = await client.get_me()  # Получаем me асинхронно
+    session: Session = list(filter(lambda x: x.me != None and x.me.id == me.id, sessions))[0]
+    if session.blocked == True and session.sent_appelation == False:
+        if isinstance(message.reply_markup, types.ReplyKeyboardRemove):
+            with open("phrases.txt", "r", encoding='utf-8') as phrases_file:
+                phrases = phrases_file.read().replace('\r', '').split('|')
+                phrase = random.choice(phrases)
+                if phrase:
+                    await client.send_message(178220800, phrase)
+                    session.sent_appelation = True
+        if isinstance(message.reply_markup, types.ReplyKeyboardMarkup):
+            if len(message.reply_markup.rows) == 4:
+                await client.send_message(178220800, message.reply_markup.rows[3][0].text)
+            if len(message.reply_markup.rows) == 2:
+                await client.send_message(178220800, message.reply_markup.rows[0][0].text)
+
+async def read_stdin():
+    global read
+    while read:
+        args = input().split(" ")
+        command = args[0]
+        del args[0]
+        if command == "exit" or command == "quit":
+            await asyncio.gather(*[asyncio.create_task(session.app.disconnect()) for session in sessions])
+            read = False
+        elif command == "join":
+            [await join_channel(session.app, args[0]) for session in sessions]
+
+# Добавь глобальную переменную в начало файла (где-то после импортов)
+logged_no_sessions = {}
+
+async def worker(company):
+    while True:
+        # Фильтруем сессии для компании
+        ses = [s for s in sessions if s.me and s.company == company and (not s.rest_until or datetime.now(UTC) >= s.rest_until)]
+        if not ses:
+            if company not in logged_no_sessions:
+                log_msg = f"Все сессии компании {company} достигли лимита или недоступны, worker приостановлен"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                logged_no_sessions[company] = True
+            await asyncio.sleep(15)
+            continue
+        else:
+            if company in logged_no_sessions:
+                del logged_no_sessions[company]
+
+        # Проверяем наличие каналов
+        if not channels.get(company) or not channels[company]:
+            log_msg = f"Нет каналов для обработки в компании {company}, завершаем worker"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            break
+
+        # Перемешиваем каналы для равномерной обработки
+        shuffled_channels = shuffle(channels[company])
+        for session in ses:  # Эстафета внутри компании
+            if not shuffled_channels:  # Если каналы закончились
+                break
+            channel = shuffled_channels.pop(0)  # Берём первый канал
+            if not channel or (channels_subscribed.get(company) and channel in channels_subscribed[company]):
+                continue
+            try:
+                if not session.app.is_connected():
+                    log_msg = f"Клиент для сессии {session.filename} отключён, пытаемся переподключиться"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    try:
+                        await session.app.connect()
+                        log_msg = f"Клиент для сессии {session.filename} успешно переподключён"
+                        rootLogger.info(log_msg)
+                        write_daily_log(log_msg)
+                    except Exception as e:
+                        log_msg = f"Не удалось переподключить сессию {session.filename}: {str(e)}"
+                        rootLogger.error(log_msg)
+                        write_daily_log(log_msg)
+                        continue
+
+                await join_channel(session.app, channel)
+                # Удаляем канал из списка после обработки
+                if channel in channels[company]:
+                    channels[company].remove(channel)
+                    with open(f"./companies/{company}/channels.txt", "w", encoding='utf-8') as file:
+                        file.write("\n".join(channels[company]))
+                await asyncio.sleep(60)  # Пауза после подписки для этой сессии
+            except Exception as e:
+                log_msg = f"Ошибка в worker для компании {company}, канал {channel}: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                if channel in channels[company]:
+                    channels[company].remove(channel)
+                    with open(f"./companies/{company}/channels.txt", "w", encoding='utf-8') as file:
+                        file.write("\n".join(channels[company]))
+                continue
+            await asyncio.sleep(15)  # Пауза перед следующей сессией в эстафете
+
+        await asyncio.sleep(15)  # Пауза между полными циклами эстафеты
+
+
+async def collect_created_views_stats(message: atypes.Message):
+    ses = [s for s in sessions if s.me and s.company == selected_company]
+    if not ses:
+        await message.reply(f"В компании {selected_company} нет активных сессий.")
+        return
+    
+    stats_report = []
+    total_channels = 0
+    total_views_all = 0
+
+    for session in ses:
+        try:
+            # Получаем привязанный канал аккаунта
+            full_user = await session.app(functions.users.GetFullUserRequest(id=session.me.id))
+            channel_id = full_user.full_user.personal_channel_id
+            if not channel_id:
+                log_msg = f"У аккаунта {session.filename} нет привязанного канала."
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                continue
+
+            # Получаем информацию о канале
+            channel_entity = await session.app.get_entity(types.PeerChannel(channel_id))
+            channel_username = f"@{channel_entity.username}" if channel_entity.username else f"t.me/c/{channel_id}"
+
+            # Собираем статистику просмотров
+            messages = []
+            async for msg in session.app.iter_messages(channel_id, limit=10):
+                if msg.views is not None:
+                    messages.append({
+                        "views": msg.views
+                    })
+            
+            if not messages:
+                log_msg = f"В канале (ID {channel_id}) нет постов с просмотрами для аккаунта {session.filename}."
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                continue
+
+            # Формируем упрощённый отчёт для канала
+            total_views = sum(msg["views"] for msg in messages)
+            total_views_all += total_views
+            total_channels += 1
+            stats_report.append(f"Сессия {session.filename}: {channel_username}, просмотров: {total_views}")
+
+            log_msg = f"Статистика собрана для канала {channel_username} (ID {channel_id}): {len(messages)} постов, {total_views} просмотров (аккаунт {session.filename})."
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+
+        except Exception as e:
+            log_msg = f"Ошибка при сборе статистики для аккаунта {session.filename}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            continue
+
+    if not stats_report:
+        await message.reply(f"Не найдено привязанных каналов с постами для компании {selected_company}.")
+        return
+
+    # Итоговый отчёт
+    stats_report.append(f"Итог: общее количество просмотров: {total_views_all}")
+    report_text = "\n".join(stats_report)
+    await message.reply(report_text)
+
+    log_msg = f"Сбор статистики по просмотрам завершён для компании {selected_company}: {total_channels} каналов, {total_views_all} просмотров."
+    rootLogger.info(log_msg)
+    write_daily_log(log_msg)
+    await bot.send_message(chat_id, log_msg)
+
+async def join_channel(client: TelegramClient, channel: str):
+    me = await client.get_me()
+    session: Session = next((s for s in sessions if s.me and s.me.id == me.id), None)
+    if not session:
+        log_msg = f"Сессия для клиента с ID {me.id} не найдена в join_channel"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        return
+    
+    if session.blocked:
+        log_msg = f"Сессия {session.filename} заблокирована, пропускаем {channel}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        return
+    if session.flood_wait_until and session.flood_wait_until > datetime.utcnow():
+        log_msg = f"Сессия {session.filename} игнорируется из-за FloodWait до {session.flood_wait_until}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        return
+    if session.unblocked_at and session.unblocked_at > datetime.utcnow():
+        log_msg = f"Сессия {session.filename} ждёт разблокировки до {session.unblocked_at}"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+        return
+
+    # Проверяем и сбрасываем лимит
+    if session.rest_until and datetime.now(UTC) >= session.rest_until:
+        session.limit = 0
+        session.rest_until = None
+        log_msg = f"Лимит для сессии {session.filename} сброшен"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+    if session.limit >= 50:
+        if not session.rest_until:
+            session.rest_until = datetime.now(UTC) + timedelta(hours=3)
+            log_msg = f"Сессия {session.filename} достигла лимита действий (50), сброс через 3 часа в {session.rest_until}"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+        return
+    
+    try:
+        if '+' in channel:
+            invite_link = channel if channel.startswith('https://t.me/+') else f"https://t.me/+{channel.lstrip('@')}"
+            try:
+                result = await client(functions.channels.JoinChannelRequest(channel=invite_link))
+                chat = result.chats[0]
+                log_msg = f"Сессия {session.filename} подписалась на приватный канал {invite_link}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, f"Аккаунт {session.filename} (компания {session.company}) подписался на приватный канал {invite_link}!")
+            except InviteRequestSentError:
+                log_msg = f"Сессия {session.filename} отправила заявку на вступление в {invite_link}, ждём одобрения"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+                return
+        else:
+            normalized_channel = channel if channel.startswith('@') else f"@{channel.split('/')[-1]}"
+            entity = await client.get_entity(normalized_channel)
+            if isinstance(entity, types.InputPeerUser):
+                log_msg = f"Ссылка {normalized_channel} — личный профиль, пропускаем для {session.filename}"
+                rootLogger.warning(log_msg)
+                write_daily_log(log_msg)
+                if channel in channels[session.company]:
+                    channels[session.company].remove(channel)
+                    with open(f"./companies/{session.company}/channels.txt", "w", encoding='utf-8') as file:
+                        file.write("\n".join(channels[session.company]))
+                return
+            elif isinstance(entity, types.InputPeerChat):
+                log_msg = f"Ссылка {normalized_channel} — чат, пропускаем для {session.filename}"
+                rootLogger.warning(log_msg)
+                write_daily_log(log_msg)
+                if channel in channels[session.company]:
+                    channels[session.company].remove(channel)
+                    with open(f"./companies/{session.company}/channels.txt", "w", encoding='utf-8') as file:
+                        file.write("\n".join(channels[session.company]))
+                return
+            await client(functions.channels.JoinChannelRequest(channel=entity))
+            chat = entity
+            log_msg = f"Сессия {session.filename} подписалась на {normalized_channel}"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, f"Аккаунт {session.filename} (компания {session.company}) подписался на канал {normalized_channel}!")
+
+        # Проверяем наличие чата обсуждения
+        try:
+            full_channel = await client(functions.channels.GetFullChannelRequest(channel=chat))
+            if not full_channel.full_chat.linked_chat_id:
+                log_msg = f"Чат обсуждения для {channel} не найден, начинаем отписку"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                
+                is_member = False
+                try:
+                    participant = await client(functions.channels.GetParticipantRequest(
+                        channel=chat,
+                        participant=await client.get_input_entity(me)
+                    ))
+                    is_member = participant.participant and not isinstance(participant.participant, types.ChannelParticipantBanned)
+                    log_msg = f"Сессия {session.filename} является участником {channel}: {is_member}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                except (UserNotParticipantError, ChannelPrivateError, ChatAdminRequiredError, Exception) as e:
+                    log_msg = f"Не удалось проверить членство в {channel} для {session.filename}: {str(e)}"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    is_member = False
+
+                if is_member:
+                    try:
+                        await client(functions.channels.LeaveChannelRequest(channel=chat))
+                        log_msg = f"Сессия {session.filename} успешно отписалась от {channel} из-за отсутствия чата обсуждения"
+                        rootLogger.info(log_msg)
+                        write_daily_log(log_msg)
+                        await bot.send_message(chat_id, log_msg)
+                    except Exception as e:
+                        log_msg = f"Ошибка при отписке от {channel} для {session.filename}: {str(e)}"
+                        rootLogger.error(log_msg)
+                        write_daily_log(log_msg)
+                        await bot.send_message(chat_id, log_msg)
+                else:
+                    log_msg = f"Сессия {session.filename} уже не участник {channel}, отписка не требуется"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                return
+        except Exception as e:
+            log_msg = f"ОШИБКА: Не удалось проверить чат обсуждения для {channel}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            return
+
+        # Обновляем сессию и списки после проверки
+        session.limit += 1
+        session.subscriptions.append({
+            'channel': channel,
+            'timestamp': datetime.now(UTC),
+            'title': chat.title
+        })
+
+        if channel in channels[session.company]:
+            channels[session.company].remove(channel)
+        if channels_subscribed.get(session.company) is None:
+            channels_subscribed[session.company] = []
+        if channel not in channels_subscribed[session.company]:
+            channels_subscribed[session.company].append(channel)
+        with open(f"./companies/{session.company}/channels.txt", "w", encoding='utf-8') as file:
+            file.write("\n".join(channels[session.company]))
+        with open(f"./companies/{session.company}/channels_sub.txt", "w", encoding='utf-8') as file:
+            file.write("\n".join(channels_subscribed[session.company]))
+        log_msg = f"Сессия {session.filename} (компания {session.company}) обработала канал {channel}, пауза 60 секунд"
+        rootLogger.info(log_msg)
+        write_daily_log(log_msg)
+
+        # Поиск постов
+        try:
+            log_msg = f"Поиск постов в {channel} для {session.filename}"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            async for message in client.iter_messages(chat, limit=10):
+                if message.text and len(message.text.encode('utf-8')) >= MIN_POST_LIMIT:
+                    event = events.NewMessage.Event(message=message)
+                    event._client = client
+                    log_msg = f"Найден подходящий пост в {channel}, вызываем getpost"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                    await getpost(event)
+                    break
+            else:
+                log_msg = f"Не найдено подходящих постов в {channel} для {session.filename}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+        except Exception as e:
+            log_msg = f"Ошибка при поиске постов в {channel} для {session.filename}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+
+    except ValueError as e:
+        if "No user has" in str(e) or "You're banned from sending messages" in str(e):
+            log_msg = f"Триггер для {session.filename} на канале {channel}: {str(e)}, запускаем повторную проверку статуса"
+            rootLogger.warning(log_msg)
+            write_daily_log(log_msg)
+            status, move_to = await check_session_status(session)
+            if status in ["жёлтый", "красный"]:
+                session_path = f"./companies/{session.company}/sessions/{session.filename}"
+                await move_session(session_path, "./spamblocked_sessions", session)
+                sessions.remove(session)
+                log_msg = f"Сессия {session.filename} перемещена в spamblocked_sessions (статус: {status}, причина: {move_to})"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+                await bot.send_message(chat_id, log_msg)
+            else:
+                log_msg = f"Сессия {session.filename} свободна после проверки (статус: {status}), продолжит работу"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            if channel in channels[session.company]:
+                channels[session.company].remove(channel)
+                with open(f"./companies/{session.company}/channels.txt", "w", encoding='utf-8') as file:
+                    file.write("\n".join(channels[session.company]))
+            return
+        else:
+            log_msg = f"Другая ошибка ValueError при подписке на {channel} для {session.filename}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+    except FloodWaitError as e:
+        session.flood_wait_until = datetime.now(UTC) + timedelta(seconds=e.seconds)
+        log_msg = f"Сессия {session.filename} попала в FloodWait на {e.seconds} секунд, до {session.flood_wait_until}"
+        rootLogger.warning(log_msg)
+        write_daily_log(log_msg)
+        await asyncio.sleep(e.seconds)
+    except UserDeactivatedBanError:
+        log_msg = f"Сессия {session.filename} деактивирована"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+    except Exception as e:
+        log_msg = f"ОШИБКА: Ошибка при вступлении в канал {channel}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+
+async def join_channels():
+    global channels, sessions
+    log_msg = "Запуск параллельных задач подписки для всех компаний"
+    rootLogger.info(log_msg)
+    write_daily_log(log_msg)
+    tasks = [asyncio.create_task(worker(company)) for company in channels.keys()]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+# ботовское
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "unsubscribe_all"))
+async def handle_unsubscribe_all(callback: atypes.CallbackQuery):
+    global sessions, selected_company
+    ses = list(filter(lambda x: x.me != None and x.company == selected_company, sessions))
+    if not ses:
+        await callback.message.edit_text("Нет активных сессий для отписки. Добавьте сессии или выберите другую компанию.")
+        return
+
+    tasks = [asyncio.create_task(unsubscribe_all_channels(session.app)) for session in ses]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    errors = [f"Сессия {s.filename}: {str(e)}" for s, e in zip(ses, results) if isinstance(e, Exception)]
+    if errors:
+        await callback.message.edit_text(f"Отписка завершена с ошибками:\n{'\n'.join(errors)}")
+    else:
+        await callback.message.edit_text("Все аккаунты успешно отписались от всех каналов!")
+    await callback.answer()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "back_to_start"))
+async def back_to_start(callback: atypes.CallbackQuery):
+    global selected_company
+    if selected_company is None:
+        kb_companies = atypes.InlineKeyboardMarkup(inline_keyboard=[
+            *[atypes.InlineKeyboardButton(text=x, callback_data="sel_company_" + x) for x in listdir("./companies")],
+            [atypes.InlineKeyboardButton(text="Создать компанию", callback_data="create_company")],
+            [atypes.InlineKeyboardButton(text="Статистика аккаунтов", callback_data="account_stats")]
+        ])
+        await callback.message.edit_text("Выберите компанию:", reply_markup=kb_companies)
+    else:
+        await callback.message.edit_text("Выберите действие ниже:", reply_markup=kb_menu)
+    await callback.answer()
+
+@dp.message((F.from_user.id == owner_id) & (F.text == "/stats_all"))
+async def stats_all(message: atypes.Message):
+    stats = get_all_stats()
+    await message.reply(stats)
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "back_to_menu"))
+async def back_to_menu(callback: atypes.CallbackQuery):
+    await callback.message.edit_text("Выберите действие ниже:", reply_markup=kb_menu)
+    await callback.answer()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "back_to_change"))
+async def back_to_change(callback: atypes.CallbackQuery):
+    await callback.message.edit_text("Выберите действие ниже:", reply_markup=kb_change_settings)
+    await callback.answer()
+
+@dp.message((F.from_user.id == owner_id) & (F.text == "/start"))
+async def start(message: atypes.Message):
+    global selected_company
+    log_msg = f"Запуск команды /start. Текущая компания: {selected_company}"
+    rootLogger.info(log_msg); write_daily_log(log_msg)
+
+    total_companies = len(listdir("./companies"))
+    company_sessions = {company: len([s for s in sessions if s.me and s.company == company]) for company in company_configs}
+    session_stats = "\n".join(f"{company} - {count} активных сессий" for company, count in company_sessions.items())
+    start_msg = (f"Компаний: {total_companies}\n"
+                 f"Статистика по сессиям:\n{session_stats}\n\n"
+                 f"Выберите действие ниже:")
+
+    if not selected_company:
+        kb_companies = atypes.InlineKeyboardMarkup(inline_keyboard=[
+            [atypes.InlineKeyboardButton(text=company, callback_data=f"sel_company_{company}")] 
+            for company in listdir("./companies")
+        ] + [
+            [atypes.InlineKeyboardButton(text="Создать компанию", callback_data="create_company"),
+             atypes.InlineKeyboardButton(text="Статистика аккаунтов", callback_data="account_stats")]
+        ])
+        await message.reply(start_msg, reply_markup=kb_companies)
+    else:
+        active_sessions = len([s for s in sessions if s.me and s.company == selected_company])
+        start_msg = (f"Выбрана компания: {selected_company}\n"
+                     f"Активных сессий: {active_sessions}\n"
+                     f"Комментариев сегодня: {sum(s.comments_today for s in sessions if s.company == selected_company)}")
+        await message.reply(start_msg, reply_markup=kb_menu)
+
+def make_stat_str(session):
+    me = session.me
+    blocked = "☢️ Заблокирован" if session.blocked else f"⚠️ Разблокируется в {session.unblocked_at}" if session.unblocked_at else "🗒 Ждет аппеляции" if session.sent_appelation else "✅ Свободен"
+    username = me.username if me.username else me.phone_number if me.phone_number else me.id
+    premium = "✅ Есть премиум" if me.is_premium else "❌ Нет премиума"
+    return f"{session.filename} - {blocked} - {username} - {premium}\n"
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "account_stats"))
+async def account_stat(callback: atypes.CallbackQuery):
+    text = list(map(make_stat_str, list(
+        filter(lambda x: x.me != None and x.company == selected_company if selected_company else True,
+               sessions)))) + ["⛔️ Отключенные аккаунты: " + ", ".join(
+        list(map(lambda x: x.filename, list(filter(lambda x: x.me == None, sessions)))))]
+    await callback.message.edit_text("\n".join(text))
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "create_company"))
+async def create_company(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(CreateCompanyState.name)
+    await callback.message.edit_text("Пожалуйста, напишите желаемое имя компании")
+
+@dp.message(CreateCompanyState.name, (F.from_user.id == owner_id))
+async def set_name(message: atypes.Message, state: FSMContext):
+    global selected_company
+    await state.clear()
+    selected_company = message.text.lower()
+    os.makedirs(f"./companies/{selected_company}/sessions")
+    channels[selected_company] = []
+    company_configs[selected_company] = {}
+    asyncio.create_task(worker(selected_company))
+    await message.reply("Компания создана, но чтобы она работала, нужно добавить сессии и каналы")
+    await start(message)
+
+@dp.callback_query(F.data.startswith("sel_company_"))
+async def select_company(callback: atypes.CallbackQuery):
+    global selected_company
+    new_company = callback.data.replace("sel_company_", "")
+    selected_company = new_company
+    log_msg = f"Выбрана компания {selected_company}"
+    rootLogger.info(log_msg); write_daily_log(log_msg)
+
+    active_sessions = len([s for s in sessions if s.me and s.company == selected_company])
+    start_msg = (f"Выбрана компания: {selected_company}\n"
+                 f"Активных сессий: {active_sessions}\n"
+                 f"Комментариев сегодня: {sum(s.comments_today for s in sessions if s.company == selected_company)}")
+    await callback.message.edit_text(start_msg, reply_markup=kb_menu)
+    await callback.answer()
+
+@dp.callback_query(F.data == "select_another_company")
+async def select_another_company(callback: atypes.CallbackQuery):
+    global selected_company
+    selected_company = None
+    log_msg = "Выбор другой компании инициирован, текущая компания сброшена"
+    rootLogger.info(log_msg); write_daily_log(log_msg)
+
+    total_companies = len(listdir("./companies"))
+    company_sessions = {company: len([s for s in sessions if s.me and s.company == company]) for company in company_configs}
+    session_stats = "\n".join(f"{company} - {count} активных сессий" for company, count in company_sessions.items())
+    start_msg = (f"Компаний: {total_companies}\n"
+                 f"Статистика по сессиям:\n{session_stats}\n\n"
+                 f"Выберите действие ниже:")
+
+    kb_companies = atypes.InlineKeyboardMarkup(inline_keyboard=[
+        [atypes.InlineKeyboardButton(text=company, callback_data=f"sel_company_{company}")] 
+        for company in listdir("./companies")
+    ] + [
+        [atypes.InlineKeyboardButton(text="Создать компанию", callback_data="create_company"),
+         atypes.InlineKeyboardButton(text="Статистика аккаунтов", callback_data="account_stats")]
+    ])
+    await callback.message.edit_text(start_msg, reply_markup=kb_companies)
+    await callback.answer()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "add_channel"))
+async def start_add_channel(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(AddPrivateChannelState.name)
+    await callback.message.edit_text("Как назвать канал?")
+    await callback.answer()
+
+@dp.message(AddPrivateChannelState.name, (F.from_user.id == owner_id))
+async def set_channel_name(message: atypes.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await state.set_state(AddPrivateChannelState.avatar)
+    await message.reply("Какой будет аватарка? Пришли фото или напиши 'нет'.")
+
+@dp.message(AddPrivateChannelState.avatar, (F.from_user.id == owner_id))
+async def set_channel_avatar(message: atypes.Message, state: FSMContext):
+    if message.content_type == 'photo':
+        avatar = message.photo[-1].file_id
+    elif message.content_type == 'document' and message.document.mime_type.startswith('image/'):
+        avatar = message.document.file_id
+    else:
+        avatar = None if message.text and message.text.lower() == 'нет' else None
+    await state.update_data(avatar=avatar)
+    await state.set_state(AddPrivateChannelState.posts)
+    await state.update_data(posts=[])
+    await message.reply("Отправляйте посты для канала (текст, фото, видео). Завершите командой /done.")
+
+@dp.message(AddPrivateChannelState.posts, (F.from_user.id == owner_id))
+async def add_channel_post(message: atypes.Message, state: FSMContext):
+    if message.text and message.text.lower() == '/done':
+        data = await state.get_data()
+        posts = data.get('posts', [])
+        if not posts:
+            await message.reply("Вы не добавили ни одного поста.")
+            return
+        await state.set_state(AddPrivateChannelState.select)
+        ses = list(filter(lambda x: x.me is not None and x.company == selected_company, sessions))
+        await message.reply("Выберите аккаунты для создания канала:", reply_markup=kb_all_or_select)
+        return
+    
+    data = await state.get_data()
+    posts = data.get('posts', [])
+    media_groups = data.get('media_groups', {})
+
+    if message.media_group_id:
+        # Обработка альбома
+        if message.media_group_id not in media_groups:
+            media_groups[message.media_group_id] = []
+        media_groups[message.media_group_id].append({
+            'file_id': message.photo[-1].file_id,
+            'caption': message.caption or '' if not media_groups[message.media_group_id] else '',
+            'entities': message.caption_entities or [] if not media_groups[message.media_group_id] else []
+        })
+        if len(media_groups[message.media_group_id]) == 1:
+            posts.append({'type': 'album', 'photos': media_groups[message.media_group_id]})
+    elif message.content_type == 'text':
+        posts.append({'type': 'text', 'content': message.text, 'entities': message.entities or []})
+    elif message.content_type == 'photo':
+        posts.append({'type': 'photo', 'file_id': message.photo[-1].file_id, 'caption': message.caption or '', 'entities': message.caption_entities or []})
+    elif message.content_type == 'video':
+        posts.append({'type': 'video', 'file_id': message.video.file_id, 'caption': message.caption or '', 'entities': message.caption_entities or []})
+    else:
+        await message.reply("Поддерживаются только текст, фото и видео.")
+        return
+    
+    await state.update_data(posts=posts, media_groups=media_groups)
+    await message.reply("Пост добавлен. Добавьте ещё или завершите с /done.")
+
+@dp.callback_query(AddPrivateChannelState.select, (F.from_user.id == owner_id) & (F.data.in_({"select_all", "select_selective"})))
+async def select_channel_accounts(callback: atypes.CallbackQuery, state: FSMContext):
+    global sessions, selected_company
+    data = await state.get_data()
+    ses = list(filter(lambda x: x.me is not None and x.company == selected_company, sessions))
+    if not ses:
+        await callback.message.edit_text("Нет активных сессий для этой компании.")
+        await state.clear()
+        await start(callback.message)
+        return
+    if callback.data == "select_all":
+        await state.update_data(select=[int(session.me.id) for session in ses])
+        await state.set_state(AddPrivateChannelState.confirm)
+        await callback.message.edit_text("Подтвердите создание канала:", reply_markup=atypes.InlineKeyboardMarkup(inline_keyboard=[
+            [atypes.InlineKeyboardButton(text="Подтвердить", callback_data="confirm_create")],
+            [atypes.InlineKeyboardButton(text="Назад", callback_data="back_to_select")]
+        ]))
+    elif callback.data == "select_selective":
+        await state.update_data(select=[])
+        builder = InlineKeyboardBuilder()
+        for session in ses:
+            me = session.me
+            builder.row(atypes.InlineKeyboardButton(
+                text=f"❌ {me.first_name}{' ' + me.last_name if me.last_name else ''} ({'@' + me.username if me.username else '+' + me.phone_number} {me.id})",
+                callback_data=f"select_channel_{me.id}"))
+        builder.row(atypes.InlineKeyboardButton(text="✅ Готово", callback_data="select_channel_done"))
+        await callback.message.edit_text("Выберите аккаунты:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(AddPrivateChannelState.select, (F.from_user.id == owner_id) & (F.data.startswith("select_channel_")))
+async def select_channel_specific(callback: atypes.CallbackQuery, state: FSMContext):
+    global sessions, selected_company
+    data = await state.get_data()
+    if callback.data == "select_channel_done":
+        select = data.get("select", [])
+        if not select:
+            await callback.message.edit_text("Выберите хотя бы один аккаунт.")
+            return
+        await state.set_state(AddPrivateChannelState.confirm)
+        await callback.message.edit_text("Подтвердите создание канала:", reply_markup=atypes.InlineKeyboardMarkup(inline_keyboard=[
+            [atypes.InlineKeyboardButton(text="Подтвердить", callback_data="confirm_create")],
+            [atypes.InlineKeyboardButton(text="Назад", callback_data="back_to_select")]
+        ]))
+        return
+    session_id = int(callback.data.split("_")[-1])
+    select = data.get("select", [])
+    if session_id in select:
+        select.remove(session_id)
+    else:
+        select.append(session_id)
+    await state.update_data(select=select)
+    ses = list(filter(lambda x: x.me is not None and x.company == selected_company, sessions))
+    builder = InlineKeyboardBuilder()
+    for session in ses:
+        me = session.me
+        is_selected = int(me.id) in data.get("select", [])
+        builder.row(atypes.InlineKeyboardButton(
+            text=f"{'✅' if is_selected else '❌'} {me.first_name}{' ' + me.last_name if me.last_name else ''} ({'@' + me.username if me.username else '+' + me.phone_number} {me.id})",
+            callback_data=f"select_channel_{me.id}"))
+    builder.row(atypes.InlineKeyboardButton(text="✅ Готово", callback_data="select_channel_done"))
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(AddPrivateChannelState.confirm, (F.from_user.id == owner_id) & (F.data == "confirm_create"))
+async def confirm_create_channel(callback: atypes.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await create_channel_for_accounts(data, callback.message, state)
+
+@dp.callback_query(AddPrivateChannelState.confirm, (F.from_user.id == owner_id) & (F.data == "back_to_select"))
+async def back_to_select(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(AddPrivateChannelState.select)
+    ses = list(filter(lambda x: x.me is not None and x.company == selected_company, sessions))
+    await callback.message.edit_text("Выберите аккаунты:", reply_markup=kb_all_or_select)
+    await callback.answer() 
+
+@dp.callback_query(AddPrivateChannelState.select, (F.from_user.id == owner_id) & (F.data == "back_to_channel"))
+async def back_to_channel(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(AddPrivateChannelState.first_post)
+    await callback.message.edit_text("Какой будет первый пост? Пришли текст, фото, или фото с текстом в подписи.")
+    await callback.answer()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data.in_({"change_fname", "change_bio", "change_lname", "change_avatar", "change_prompts", "delete_avatar"})))
+async def change(callback: atypes.CallbackQuery, state: FSMContext):
+    # Получаем полное значение callback.data
+    callback_data = callback.data
+    # Определяем change_type в зависимости от значения
+    if callback_data.startswith("change_"):
+        change_type = callback_data[7:]  # Убираем "change_" для соответствующих действий
+    else:
+        change_type = callback_data  # Оставляем как есть для "delete_avatar"
+    
+    rootLogger.info(f"Выбран тип изменения: {change_type}")
+    await state.update_data(change=change_type)
+    
+    if change_type == "fname":
+        await state.set_state(ChangeState.value)
+        await callback.message.edit_text("Отправьте новое имя для аккаунтов:")
+    elif change_type == "lname":
+        await state.set_state(ChangeState.value)
+        await callback.message.edit_text("Отправьте новую фамилию для аккаунтов:")
+    elif change_type == "avatar":
+        await state.set_state(ChangeState.value)
+        await callback.message.edit_text("Отправьте новое фото")
+    elif change_type == "delete_avatar":
+        await state.set_state(ChangeState.select)
+        await callback.message.edit_text("К каким аккаунтам применить удаление?", reply_markup=kb_all_or_select)
+    else:
+        await state.set_state(ChangeState.value)
+        await callback.message.edit_text("Отправьте значение")
+    await callback.answer()
+
+@dp.message((F.from_user.id == owner_id) & (F.text == "/cancel"))
+async def cancel(message: atypes.Message, state: FSMContext):
+    if await state.get_state() is not None:
+        await state.clear()
+        await message.reply("Отменено.")
+
+# Добавить этот код после других обработчиков dp.callback_query в main.py
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "change_company"))
+async def change_company(callback: atypes.CallbackQuery):
+    global selected_company
+    selected_company = None
+    kb_companies = atypes.InlineKeyboardMarkup(inline_keyboard=list(
+        map(lambda x: [atypes.InlineKeyboardButton(text=x, callback_data="sel_company_" + x)],
+            listdir("./companies"))
+        ) + [[atypes.InlineKeyboardButton(text="Создать компанию", callback_data="create_company")]])
+    await callback.message.edit_text("Выберите компанию:", reply_markup=kb_companies)
+    await callback.answer()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data.startswith("company_change_")))
+async def change_company_config(callback: atypes.CallbackQuery, state: FSMContext):
+    text = {
+        "filter": "Перечислите через запятую ключевые слова, которые хотите установить (`откл` для отключения)",
+        "timeout": "Отправьте в секундах время, через которое сессии будут комментировать пост (0 для отключения)"
+    }
+    change = callback.data[15:]
+    try:
+        text[change]
+    except:
+        await callback.message.reply("???")
+        return
+    await state.set_state(CompanyConfigChangeState.value)
+    await state.update_data(change=change)
+    await callback.message.edit_text(text[change])
+
+@dp.message(CompanyConfigChangeState.value, (F.from_user.id == owner_id))
+async def get_value(message: atypes.Message, state: FSMContext):
+    data = await state.get_data()
+    change = data["change"]
+    value = message.text
+    try:
+        if change == "filter":
+            value = value.split(",")[0].lower()
+        else:
+            value = int(value)
+    except:
+        await message.reply("Убедитесь, что вы написали значение в верном формате")
+    if value == 0 or value == "откл":
+        del company_configs[selected_company][change]
+    else:
+        company_configs[selected_company][change] = value
+    with open(f"./companies/{selected_company}/config.json", "w", encoding="utf-8") as file:
+        json.dump(company_configs[selected_company], file, ensure_ascii=False)
+    await message.reply("Значения успешно применены")
+    await start(message)
+
+async def add_sessions(company, zip_path):
+    # Создаём временную папку для извлечения
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Открываем и извлекаем ZIP-архив
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+
+        # Путь для сессий компании
+        sessions_dir = f"./companies/{company}/sessions"
+        os.makedirs(sessions_dir, exist_ok=True)
+
+        # Обрабатываем извлечённые файлы
+        for filename in os.listdir(temp_dir):
+            if filename.endswith('.session'):
+                session_path = os.path.join(temp_dir, filename)
+                target_path = os.path.join(sessions_dir, filename)
+                # Перемещаем файл сессии
+                shutil.move(session_path, target_path)
+                rootLogger.info(f"Добавлена сессия {filename} для компании {company}")
+
+                # Ищем JSON-файл с таким же номером
+                session_number = filename.replace('.session', '')
+                json_filename = f"{session_number}.json"
+                json_path = os.path.join(temp_dir, json_filename)
+                if os.path.exists(json_path):
+                    target_json_path = os.path.join(sessions_dir, json_filename)
+                    shutil.move(json_path, target_json_path)
+                    rootLogger.info(f"Добавлен JSON-файл {json_filename} для сессии {session_number}")
+
+    finally:
+        # Удаляем временную папку
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            rootLogger.error(f"Ошибка при удалении временной папки {temp_dir}: {str(e)}")
+
+@dp.message(AddSessionState.add, (F.from_user.id == owner_id))
+async def add_zip_sessions(message: atypes.Message, state: FSMContext):
+    global sessions, liking_tasks
+    if message.document is None or message.document.mime_type != "application/zip":
+        return await message.reply("Отправьте zip-файл")
+
+    await state.clear()
+    file = await bot.get_file(message.document.file_id)
+    msg = await message.reply("Сессии добавляются...")
+
+    counter = 0
+    new_sessions = []
+    try:
+        # Скачиваем ZIP-архив во временный файл
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as temp_zip:
+            zip_data = await bot.download_file(file.file_path)
+            temp_zip.write(zip_data.getvalue())
+            temp_zip_path = temp_zip.name
+
+        # Используем функцию add_sessions для извлечения и перемещения файлов
+        await add_sessions(selected_company, temp_zip_path)
+
+        # После перемещения файлов активируем сессии
+        session_files = [f for f in os.listdir(f"./companies/{selected_company}/sessions") if f.endswith('.session')]
+        for session_file in session_files:
+            full_path = f"./companies/{selected_company}/sessions/{session_file}"
+            client = make_client(full_path)
+            session = Session(client, session_file, selected_company)
+            new_sessions.append(session)
+
+        async def activate_session(session):
+            try:
+                await session.app.start(phone=f"+{session.filename[:-8]}")
+                me = await session.app.get_me()
+                if me:
+                    session.id = me.id
+                    session.me = me
+                    # Переименовываем сессию, если нужно
+                    new_filename = f"{me.phone}.session"
+                    old_path = f"./companies/{selected_company}/sessions/{session.filename}"
+                    new_path = f"./companies/{selected_company}/sessions/{new_filename}"
+                    # Закрываем клиент перед перемещением
+                    if session.app.is_connected():
+                        await session.app.disconnect()
+                    if session.filename != new_filename:
+                        shutil.move(old_path, new_path)
+                        # Перемещаем JSON-файл, если он есть
+                        old_json_path = f"./companies/{selected_company}/sessions/{session.filename.replace('.session', '.json')}"
+                        new_json_path = f"./companies/{selected_company}/sessions/{new_filename.replace('.session', '.json')}"
+                        if os.path.exists(old_json_path):
+                            shutil.move(old_json_path, new_json_path)
+                            rootLogger.info(f"JSON-файл переименован: {session.filename.replace('.session', '.json')} -> {new_filename.replace('.session', '.json')}")
+                        session.filename = new_filename
+                    # Запускаем задачу лайкинга, если лайкинг активен для компании
+                    if company_active.get(selected_company, False):
+                        task = asyncio.create_task(worker_liking_stories(session))
+                        liking_tasks.append((task, session))
+                        rootLogger.info(f"Запущена задача лайкинга для {session.filename} после добавления")
+                    log_msg = f"Сессия {session.filename} активирована и добавлена с ID {me.id}"
+                    rootLogger.info(log_msg)
+                    write_daily_log(log_msg)
+                    return True
+                else:
+                    raise Exception("Не удалось получить данные пользователя")
+            except Exception as e:
+                # Закрываем клиент в случае ошибки
+                if session.app.is_connected():
+                    await session.app.disconnect()
+                log_msg = f"Ошибка активации сессии {session.filename}: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                return False
+
+        tasks = [activate_session(session) for session in new_sessions]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for session, result in zip(new_sessions[:], results):
+            if result is True:
+                counter += 1
+            else:
+                # Закрываем клиент перед удалением
+                if session.app.is_connected():
+                    await session.app.disconnect()
+                # Удаляем неактивированную сессию и её JSON-файл
+                session_path = f"./companies/{selected_company}/sessions/{session.filename}"
+                json_path = f"./companies/{selected_company}/sessions/{session.filename.replace('.session', '.json')}"
+                if os.path.exists(session_path):
+                    os.remove(session_path)
+                if os.path.exists(json_path):
+                    os.remove(json_path)
+                    rootLogger.info(f"Удалён JSON-файл {session.filename.replace('.session', '.json')} для неактивированной сессии")
+                new_sessions.remove(session)
+
+        sessions.extend(new_sessions)
+        if counter == 0:
+            await msg.edit_text("Сессии в архиве невалидны.")
+        else:
+            await msg.edit_text(f"Добавлено сессий: {counter}")
+        await start(message)
+
+    except Exception as e:
+        await msg.edit_text(f"Ошибка при обработке архива: {str(e)}")
+        log_msg = f"Критическая ошибка при добавлении сессий: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+
+    finally:
+        # Удаляем временный ZIP-файл
+        if 'temp_zip_path' in locals():
+            try:
+                os.remove(temp_zip_path)
+            except Exception as e:
+                rootLogger.error(f"Ошибка при удалении временного файла {temp_zip_path}: {str(e)}")
+
+    async def check_session(session_path, json_path=None):
+        try:
+            client = make_client(session_path)
+            try:
+                # Устанавливаем тайм-аут для подключения
+                async with asyncio.timeout(30):  # Тайм-аут 30 секунд (для стабильности)
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        try:
+                            async with asyncio.timeout(30):  # Тайм-аут 30 секунд
+                                me = await client.get_me()
+                                if me:
+                                    log_msg = f"Сессия {os.path.basename(session_path)} авторизована: {me.phone if me.phone else me.id}"
+                                    rootLogger.info(log_msg)
+                                    write_daily_log(log_msg)
+                                    # Извлекаем номер из .json, если он есть
+                                    session_id = None
+                                    if json_path and os.path.exists(json_path):
+                                        try:
+                                            with open(json_path, 'r', encoding='utf-8') as json_file:
+                                                json_data = json.load(json_file)
+                                                # Проверяем различные поля для номера (можешь уточнить структуру)
+                                                session_id = str(json_data.get('id', json_data.get('phone', json_data.get('user_id', os.path.splitext(os.path.basename(session_path))[0]))))
+                                            log_msg = f"Извлечен номер из .json для {os.path.basename(session_path)}: {session_id}"
+                                            rootLogger.info(log_msg)
+                                            write_daily_log(log_msg)
+                                        except json.JSONDecodeError as e:
+                                            log_msg = f"Ошибка парсинга .json для {os.path.basename(session_path)}: {str(e)}"
+                                            rootLogger.error(log_msg)
+                                            write_daily_log(log_msg)
+                                            session_id = os.path.splitext(os.path.basename(session_path))[0]  # Используем имя файла как запасной вариант
+                                        except Exception as e:
+                                            log_msg = f"Ошибка чтения .json для {os.path.basename(session_path)}: {str(e)}"
+                                            rootLogger.error(log_msg)
+                                            write_daily_log(log_msg)
+                                            session_id = os.path.splitext(os.path.basename(session_path))[0]  # Используем имя файла как запасной вариант
+                                    else:
+                                        log_msg = f".json не найден для {os.path.basename(session_path)}, используется имя файла"
+                                        rootLogger.warning(log_msg)
+                                        write_daily_log(log_msg)
+                                        session_id = os.path.splitext(os.path.basename(session_path))[0]  # Используем имя файла, если .json нет
+
+                                    # Проверяем уникальность session_id
+                                    original_session_id = session_id
+                                    i = 1
+                                    while f"{session_id}.session" in [os.path.basename(f) for f in os.listdir(f"./companies/{selected_company}/sessions") if f.endswith('.session')]:
+                                        session_id = f"{original_session_id}_{i}"
+                                        i += 1
+                                        log_msg = f"Обнаружен дубликат имени {original_session_id}.session, использовано {session_id}.session"
+                                        rootLogger.warning(log_msg)
+                                        write_daily_log(log_msg)
+
+                                    session = Session(client, f"{session_id}.session", selected_company)
+                                    session.id = me.id
+                                    session.me = me
+                                    # Сохраняем .session файл с новым именем
+                                    session_dest = os.path.join(f"./companies/{selected_company}/sessions", f"{session_id}.session")
+                                    shutil.copy2(session_path, session_dest)  # Копируем файл
+                                    session_files.append(session_dest)  # Записываем путь для логирования
+                                    log_msg = f"Сессия сохранена с именем: {session_dest}"
+                                    rootLogger.info(log_msg)
+                                    write_daily_log(log_msg)
+
+                                    # Сохраняем .json, если он был извлечен
+                                    if json_path and os.path.exists(json_path):
+                                        json_dest = os.path.join(f"./companies/{selected_company}/sessions", f"{session_id}.json")
+                                        shutil.copy2(json_path, json_dest)  # Копируем .json с тем же именем, что и .session
+                                        json_files.append(json_dest)
+                                        log_msg = f"Сохранен .json файл для валидной сессии: {json_dest}"
+                                        rootLogger.info(log_msg)
+                                        write_daily_log(log_msg)
+                                    return session, None
+                                else:
+                                    log_msg = f"Сессия {os.path.basename(session_path)}: Не удалось получить данные пользователя"
+                                    rootLogger.warning(log_msg)
+                                    write_daily_log(log_msg)
+                                    return None, "Не удалось получить данные пользователя"
+                        except asyncio.TimeoutError:
+                            log_msg = f"Сессия {os.path.basename(session_path)}: Тайм-аут при получении данных пользователя"
+                            rootLogger.warning(log_msg)
+                            write_daily_log(log_msg)
+                            return None, "Тайм-аут при получении данных пользователя"
+                        except Exception as e:
+                            log_msg = f"Сессия {os.path.basename(session_path)}: Ошибка при получении данных пользователя: {str(e)}"
+                            rootLogger.error(log_msg)
+                            write_daily_log(log_msg)
+                            return None, f"Ошибка при получении данных: {str(e)}"
+                    else:
+                        log_msg = f"Сессия {os.path.basename(session_path)}: Не авторизована, возможно, требует код подтверждения"
+                        rootLogger.warning(log_msg)
+                        write_daily_log(log_msg)
+                        return None, "Требуется код подтверждения, сессия игнорируется"
+            except asyncio.TimeoutError:
+                log_msg = f"Сессия {os.path.basename(session_path)}: Тайм-аут при подключении"
+                rootLogger.warning(log_msg)
+                write_daily_log(log_msg)
+                return None, "Тайм-аут при подключении"
+            except Exception as e:
+                if "Please enter the code you received" in str(e) or "Authorization required" in str(e):
+                    log_msg = f"Сессия {os.path.basename(session_path)}: Требует код подтверждения"
+                    rootLogger.warning(log_msg)
+                    write_daily_log(log_msg)
+                    return None, "Требуется код подтверждения, сессия игнорируется"
+                log_msg = f"Сессия {os.path.basename(session_path)}: Ошибка подключения: {str(e)}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                return None, f"Ошибка подключения: {str(e)}"
+            finally:
+                await client.disconnect()
+        except Exception as e:
+            log_msg = f"Сессия {os.path.basename(session_path)}: Критическая ошибка при создании клиента: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            return None, f"Критическая ошибка при создании клиента: {str(e)}"
+
+    try:
+        # Определяем тип архива и открываем его
+        if message.document.mime_type == "application/zip":
+            import zipfile
+            with zipfile.ZipFile(archive_data, 'r') as zip_file:
+                session_json_pairs = []  # Список пар (.session, .json) для последовательной обработки
+                for file_name in zip_file.filelist:
+                    base_name = os.path.splitext(os.path.basename(file_name.filename))[0]
+                    if file_name.filename.endswith(".session"):
+                        json_file_name = None
+                        for json_name in [n for n in zip_file.filelist if n.filename.endswith(".json")]:
+                            if os.path.splitext(os.path.basename(json_name.filename))[0] == base_name:
+                                json_file_name = json_name.filename
+                                break
+                        session_json_pairs.append((file_name.filename, json_file_name))
+
+                # Последовательно проверяем каждую сессию
+                for session_file_name, json_file_name in session_json_pairs:
+                    if session_file_name:
+                        # Извлекаем .session файл во временный файл
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".session") as temp_file:
+                                temp_file.write(zip_file.read(session_file_name))
+                                temp_file_path = temp_file.name
+                            # Извлекаем .json во временный файл, если он есть
+                            temp_json_path = None
+                            if json_file_name:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp_json:
+                                    temp_json.write(zip_file.read(json_file_name))
+                                    temp_json_path = temp_json.name
+
+                            # Проверяем и сохраняем сессию
+                            session, error = await check_session(temp_file_path, temp_json_path)
+                            if session:
+                                new_sessions.append(session)
+                                counter += 1
+                                log_msg = f"Сессия активирована и сохранена: {session.me.phone if session.me.phone else session.me.id}, файл: {session.filename}, путь: {session_files[-1]}"
+                                rootLogger.info(log_msg)
+                                write_daily_log(log_msg)
+                            elif error:
+                                errors.append(f"{session_file_name}: {error}")
+                            os.remove(temp_file_path)  # Удаляем временный .session файл
+                            if temp_json_path and os.path.exists(temp_json_path):
+                                os.remove(temp_json_path)  # Удаляем временный .json файл
+                        except Exception as e:
+                            errors.append(f"{session_file_name}: {str(e)}")
+                            continue
+        elif message.document.mime_type == "application/x-rar-compressed":
+            import rarfile
+            with rarfile.RarFile(archive_data, 'r') as rar_file:
+                session_json_pairs = []  # Список пар (.session, .json) для последовательной обработки
+                for file_name in rar_file.namelist():
+                    base_name = os.path.splitext(os.path.basename(file_name))[0]
+                    if file_name.endswith(".session"):
+                        json_file_name = None
+                        for json_name in [n for n in rar_file.namelist() if n.endswith(".json")]:
+                            if os.path.splitext(os.path.basename(json_name))[0] == base_name:
+                                json_file_name = json_name
+                                break
+                        session_json_pairs.append((file_name, json_file_name))
+
+                # Последовательно проверяем каждую сессию
+                for session_file_name, json_file_name in session_json_pairs:
+                    if session_file_name:
+                        # Извлекаем .session файл во временный файл
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".session") as temp_file:
+                                temp_file.write(rar_file.read(session_file_name))
+                                temp_file_path = temp_file.name
+                            # Извлекаем .json во временный файл, если он есть
+                            temp_json_path = None
+                            if json_file_name:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp_json:
+                                    temp_json.write(rar_file.read(json_file_name))
+                                    temp_json_path = temp_json.name
+
+                            # Проверяем и сохраняем сессию
+                            session, error = await check_session(temp_file_path, temp_json_path)
+                            if session:
+                                new_sessions.append(session)
+                                counter += 1
+                                log_msg = f"Сессия активирована и сохранена: {session.me.phone if session.me.phone else session.me.id}, файл: {session.filename}, путь: {session_files[-1]}"
+                                rootLogger.info(log_msg)
+                                write_daily_log(log_msg)
+                            elif error:
+                                errors.append(f"{session_file_name}: {error}")
+                            os.remove(temp_file_path)  # Удаляем временный .session файл
+                            if temp_json_path and os.path.exists(temp_json_path):
+                                os.remove(temp_json_path)  # Удаляем временный .json файл
+                        except Exception as e:
+                            errors.append(f"{session_file_name}: {str(e)}")
+                            continue
+        else:
+            await msg.edit_text("Неизвестный формат архива. Поддерживаются только .zip и .rar")
+            return
+
+        # Добавляем новые сессии в общий список
+        sessions.extend(new_sessions)
+
+        # Выводим результат
+        if counter == 0:
+            await msg.edit_text("Сессии в архиве не валидны. Ничего не было добавлено")
+        elif errors:
+            await msg.edit_text(
+                f"Добавлено сессий: {counter}\nНекоторые сессии невалидны: {', '.join(set(errors))}"
+            )
+        else:
+            await msg.edit_text(f"Добавлено сессий: {counter}")
+        await start(message)
+
+    except zipfile.BadZipFile:
+        await msg.edit_text("Ошибка: Неверный формат .zip файла")
+    except rarfile.BadRarFile:
+        await msg.edit_text("Ошибка: Неверный формат .rar файла")
+    except Exception as e:
+        await msg.edit_text(f"Ошибка при обработке архива: {str(e)}")
+        log_msg = f"Критическая ошибка при добавлении сессий: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+
+    # Очистка временных файлов, если они остались
+    for temp_file in [f for f in os.listdir() if f.startswith("tmp") and (f.endswith(".session") or f.endswith(".json"))]:
+        os.remove(os.path.join(os.getcwd(), temp_file))
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "add_channels"))
+async def change_channels(callback: atypes.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Выберите способ добавления каналов:", reply_markup=kb_add_channels)
+    await callback.answer()
+
+@dp.message(AddChannelState.add, (F.from_user.id == owner_id))
+async def add_text(message: atypes.Message, state: FSMContext):
+    global channels, selected_company
+    document = None
+    
+    if message.document and message.document.file_name.endswith('.txt'):
+        # Обработка .txt файла
+        file = await bot.get_file(message.document.file_id)
+        downloaded = await bot.download_file(file.file_path)
+        document = downloaded.read().decode("utf-8").replace("\r", "")
+    elif message.text:
+        # Обработка текстового сообщения
+        document = message.text
+    else:
+        await message.reply("Список пустой, пожалуйста отправьте список каналов текстом или .txt файлом")
+        return
+    
+    if not document:
+        await message.reply("Список пустой, пожалуйста отправьте список каналов текстом или .txt файлом")
+        return
+    
+    await state.clear()
+    new_channels = [ch.replace("https://t.me/", "@").strip() for ch in document.split("\n") if ch.strip()]
+    subscribed = channels_subscribed.get(selected_company, [])
+    valid_new_channels = [ch for ch in new_channels if ch and ch not in subscribed]  # Исключаем уже подписанные
+    
+    if not valid_new_channels:
+        await message.reply("Все указанные каналы уже подписаны. Добавьте новые каналы.")
+        return
+    
+    channels[selected_company].extend(valid_new_channels)
+    with open(f"./companies/{selected_company}/channels.txt", "w", encoding='utf-8') as file:
+        file.write("\n".join(channels[selected_company]))
+    
+    total_added = len(new_channels)
+    new_count = len(valid_new_channels)
+    await message.reply(f"Добавлено каналов: {new_count} из {total_added}. Уже подписаны: {total_added - new_count}.")
+    await change_channels(message, state)  # Возвращаемся в меню добавления каналов
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "add_channels_excel"))
+async def start_filter_channels(callback: atypes.CallbackQuery, state: FSMContext):
+    await state.set_state(FilterChannelsState.excel)
+    await callback.message.edit_text("Отправьте Excel-файл (.xlsx) с каналами для фильтрации.", reply_markup=None)
+    await callback.answer()
+
+# Обработчик получения Excel-файла
+@dp.message(FilterChannelsState.excel, (F.from_user.id == owner_id))
+async def handle_excel_channels(message: atypes.Message, state: FSMContext):
+    if message.document and message.document.file_name.endswith('.xlsx'):
+        file = await bot.get_file(message.document.file_id)
+        
+        # Увеличиваем тайм-аут для загрузки большого файла (например, 300 секунд)
+        try:
+            async with asyncio.timeout(300):  # Тайм-аут 5 минут
+                downloaded = await bot.download_file(file.file_path)
+        except asyncio.TimeoutError:
+            await message.reply("Ошибка: Тайм-аут при загрузке файла. Файл слишком большой или сервер Telegram медленно отвечает. Попробуйте снова или уменьшите размер файла.")
+            log_msg = "Тайм-аут при загрузке Excel-файла"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            return
+
+        # Создаем временный файл и записываем данные
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
+            temp_input_file = temp_file.name
+            # Читаем содержимое BytesIO как bytes и записываем
+            temp_file.write(downloaded.read())  # Читаем все содержимое как bytes
+            temp_file.close()  # Закрываем файл после записи
+
+        await state.update_data(input_file=temp_input_file)
+        await state.set_state(FilterChannelsState.keywords)
+        await message.reply("Файл успешно загружен. Теперь отправьте ключевые слова для фильтрации (через запятую, например: слово1, слово2).")
+        await message.answer("Файл загружен, ожидаем ключевые слова...")  # Оставляем для уведомления, если нужно
+    else:
+        await message.reply("Пожалуйста, отправьте корректный Excel-файл (.xlsx).")
+
+# Обработчик получения ключевых слов
+@dp.message(FilterChannelsState.keywords, (F.from_user.id == owner_id))
+async def handle_keywords_channels(message: atypes.Message, state: FSMContext):
+    try:
+        keywords_text = message.text.strip()
+        if not keywords_text:
+            await message.reply("Ключевые слова не могут быть пустыми. Попробуйте снова.")
+            return
+
+        # Сохраняем ключевые слова во временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as temp_file:
+            temp_keywords_file = temp_file.name
+            temp_file.write(keywords_text.encode('utf-8'))
+
+        # Загружаем ключевые слова
+        keywords = [keyword.strip().lower() for keyword in keywords_text.split(',') if keyword.strip()]
+        if not keywords:
+            await message.reply("Ошибка: не удалось обработать ключевые слова. Попробуйте снова.")
+            os.remove(temp_keywords_file)
+            return
+
+        # Получаем данные из состояния
+        data = await state.get_data()
+        input_file = data['input_file']
+
+        # Проверяем существование временного файла Excel
+        if not os.path.exists(input_file):
+            await message.reply(f"Ошибка: временный файл Excel не найден: {input_file}")
+            os.remove(temp_keywords_file)
+            await state.clear()
+            return
+
+        # Фильтруем каналы из Excel
+        import pandas as pd
+        try:
+            df = pd.read_excel(input_file, header=None, names=['title', 'title_length', 'description', 'link', 'members_count'])
+            # Фильтруем по ключевым словам в названии или описании
+            filtered_df = df[df.apply(lambda row: any(
+                keyword in str(row['description']).lower() or 
+                keyword in str(row['title']).lower() 
+                for keyword in keywords
+            ), axis=1)]
+            # Удаляем дубликаты по ссылке
+            unique_df = filtered_df.drop_duplicates(subset=['link'])
+
+            # Подсчитываем количество
+            total_channels = len(df)
+            filtered_channels = len(unique_df)
+            added_channels = 0
+
+            # Добавляем отфильтрованные каналы в channels[selected_company]
+            new_channels = [ch.replace("https://t.me/", "@").strip() for ch in unique_df['link'].tolist() if ch]
+            subscribed = channels_subscribed.get(selected_company, [])
+            valid_new_channels = [ch for ch in new_channels if ch and ch not in subscribed]  # Исключаем уже подписанные
+            if valid_new_channels:
+                channels[selected_company].extend(valid_new_channels)
+                with open(f"./companies/{selected_company}/channels.txt", "w", encoding='utf-8') as file:
+                    file.write("\n".join(channels[selected_company]))
+                added_channels = len(valid_new_channels)
+
+            # Формируем отчет
+            report = (f"Фильтрация завершена!\n"
+                      f"Исходных каналов: {total_channels}\n"
+                      f"Отфильтрованных каналов (с ключевыми словами): {filtered_channels}\n"
+                      f"Добавлено новых каналов: {added_channels}")
+            await message.reply(report)
+
+            # Очищаем временные файлы
+            os.remove(input_file)
+            os.remove(temp_keywords_file)
+            await state.clear()
+            await change_channels(message, None)  # Корректно передаем message, без state, так как оно уже очищено
+        except Exception as e:
+            await message.reply(f"Ошибка при обработке Excel: {str(e)}")
+            log_msg = f"Ошибка фильтрации каналов из Excel: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await bot.send_message(chat_id, log_msg)
+            if os.path.exists(input_file):
+                os.remove(input_file)
+            if os.path.exists(temp_keywords_file):
+                os.remove(temp_keywords_file)
+            await state.clear()
+    except Exception as e:
+        await message.reply(f"Ошибка: {str(e)}")
+        log_msg = f"Критическая ошибка при фильтрации каналов: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await bot.send_message(chat_id, log_msg)
+        await state.clear()
+
+@dp.callback_query((F.from_user.id == owner_id) & (F.data == "change_sessions"))
+async def change_sessions(callback: atypes.CallbackQuery):
+    await callback.message.edit_text("Выберите действие ниже:", reply_markup=kb_change_settings)
+    await callback.answer()
+
+@dp.message(ChangeState.value, (F.from_user.id == owner_id) & (F.photo | F.text))
+async def set_val(message: atypes.Message, state: FSMContext):
+    data = await state.get_data()
+    change = data["change"]
+    if change == "avatar":
+        if message.photo:
+            best_photo = sorted(message.photo, key=lambda x: x.file_size, reverse=True)[0]
+            file = await bot.get_file(best_photo.file_id)
+            photo_io = await bot.download_file(file.file_path)
+            photo_bytes = photo_io.getvalue()
+            await state.update_data(value=photo_bytes)
+            await state.set_state(ChangeState.select)
+            await message.reply("К каким аккаунтам применить?", reply_markup=kb_all_or_select)
+        else:
+            await message.reply("Отправьте фото или 'отмена'")
+    elif change in ["fname", "lname", "bio"]:
+        await state.update_data(value=message.text)
+        await state.set_state(ChangeState.select)
+        await message.reply("К каким аккаунтам применить?", reply_markup=kb_all_or_select)
+
+@dp.callback_query(ChangeState.select, (F.from_user.id == owner_id) & (F.data.startswith("select_")))
+async def sel_acc(callback: atypes.CallbackQuery, state: FSMContext):
+    global sessions
+    try:
+        # Получаем активные сессии для текущей компании
+        ses = list(filter(lambda x: x.me is not None and x.company == selected_company, sessions))
+        if not ses:
+            await callback.message.edit_text("Нет активных сессий для этой компании. Добавьте сессии или проверьте настройки.")
+            await state.clear()
+            await start(callback.message)
+            return
+
+        data = await state.get_data()
+        
+        # Инициализируем select, если ключа нет (по умолчанию пустой список)
+        select = data.get("select", [])
+        if not isinstance(select, list):
+            select = []  # Убедимся, что select — список
+        
+        # Разделяем обработку callback.data
+        if callback.data == "select_done":
+            if not select:
+                await callback.message.edit_text("Выберите хотя бы один аккаунт.")
+                return
+            await apply_data(callback, state)
+            return
+        elif callback.data == "select_all":
+            # Обработка выбора всех аккаунтов
+            await state.update_data(select=[int(session.me.id) for session in ses])
+            log_msg = f"Выбраны все аккаунты для компании {selected_company}: {len(ses)} аккаунтов"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+            await apply_data(callback, state)
+            return
+        elif callback.data == "select_selective":
+            # Перенаправляем на sel_accs, если она определена
+            try:
+                await sel_accs(callback, state)
+            except NameError:
+                log_msg = f"ОШИБКА: Функция sel_accs не определена в коде для компании {selected_company}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await callback.message.edit_text("Произошла ошибка. Обратитесь к разработчику.")
+            return
+        
+        # Обрабатываем конкретные идентификаторы сессий
+        try:
+            # Проверяем, является ли остаток после "select_" числом
+            session_id_str = callback.data[7:]
+            if not session_id_str.isdigit():
+                log_msg = f"ОШИБКА: Некорректный идентификатор сессии в callback.data: {callback.data}"
+                rootLogger.error(log_msg)
+                write_daily_log(log_msg)
+                await callback.message.edit_text("Произошла ошибка. Попробуйте еще раз.")
+                return
+            session_id = int(session_id_str)
+            
+            if session_id in select:
+                select.remove(session_id)
+                log_msg = f"Убран аккаунт {session_id} из выбора для компании {selected_company}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            else:
+                select.append(session_id)
+                log_msg = f"Добавлен аккаунт {session_id} в выбор для компании {selected_company}"
+                rootLogger.info(log_msg)
+                write_daily_log(log_msg)
+            await state.update_data(select=select)
+        except ValueError as e:
+            log_msg = f"ОШИБКА: Некорректное значение в callback.data для сессии: {callback.data}, ошибка: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await callback.message.edit_text("Произошла ошибка при обработке выбора. Попробуйте еще раз.")
+            return
+        except Exception as e:
+            log_msg = f"Критическая ошибка в sel_acc для компании {selected_company}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await callback.message.edit_text("Произошла критическая ошибка. Обратитесь к разработчику.")
+            return
+        
+        # Генерируем клавиатуру
+        builder = InlineKeyboardBuilder()
+        try:
+            for session in ses:
+                me = session.me
+                if not me or not hasattr(me, 'id'):  # Проверяем, что me существует и имеет id
+                    log_msg = f"ОШИБКА: Сессия {session.filename} имеет некорректные данные (me отсутствует или не имеет id)"
+                    rootLogger.error(log_msg)
+                    write_daily_log(log_msg)
+                    continue
+                is_selected = int(me.id) in select
+                builder.row(atypes.InlineKeyboardButton(
+                    text=f"{'✅' if is_selected else '❌'} {me.first_name}{' ' + me.last_name if me.last_name else ''} ({'@' + me.username if me.username else '+' + me.phone_number if me.phone_number else str(me.id)} {me.id})",
+                    callback_data=f"select_{me.id}"))
+            builder.row(atypes.InlineKeyboardButton(text="✅ Готово", callback_data="select_done"))
+            builder.row(atypes.InlineKeyboardButton(text="Выбрать все", callback_data="select_all"))
+            builder.row(atypes.InlineKeyboardButton(text="Выбранные аккаунты", callback_data="select_selective"))
+        except Exception as e:
+            log_msg = f"ОШИБКА: Не удалось построить клавиатуру для компании {selected_company}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await callback.message.edit_text("Произошла ошибка при создании клавиатуры. Попробуйте еще раз.")
+            return
+
+        # Обновляем клавиатуру
+        try:
+            await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+            log_msg = f"Обновлена клавиатура для выбора аккаунтов в компании {selected_company}"
+            rootLogger.info(log_msg)
+            write_daily_log(log_msg)
+        except Exception as e:
+            log_msg = f"ОШИБКА: Не удалось обновить клавиатуру для компании {selected_company}: {str(e)}"
+            rootLogger.error(log_msg)
+            write_daily_log(log_msg)
+            await callback.message.edit_text("Произошла ошибка при обновлении клавиатуры. Попробуйте еще раз позже.", reply_markup=builder.as_markup())
+    except Exception as e:
+        log_msg = f"Критическая ошибка в sel_acc для компании {selected_company}: {str(e)}"
+        rootLogger.error(log_msg)
+        write_daily_log(log_msg)
+        await callback.message.edit_text("Произошла критическая ошибка. Обратитесь к разработчику.")
+    await callback.answer()
+
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    pass
